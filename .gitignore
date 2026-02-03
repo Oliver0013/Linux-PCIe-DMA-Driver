@@ -35,3 +35,6 @@ modules.order
 .vscode/
 .idea/
 .DS_Store
+
+# 忽略 Buildroot 源码目录，我们只提交配置文件
+buildroot/

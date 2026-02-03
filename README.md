@@ -54,13 +54,24 @@ Linux-PCIe-DMA-Driver/
 ### P0: 环境准备与预研 (Preparation)
 
 * [x] **2026-01-30**: 初始化 GitHub 仓库，建立符合工业规范的目录结构。
-* [ ] **2026-01-31**: 下载 Linux 5.15 和 Buildroot 源码，配置 `.gitignore` 规则。
+* [x] **2026-01-31**: 下载 Linux 5.15 和 Buildroot 源码，配置 `.gitignore` 规则。
 
 ### P1: BSP 构建 (System Build)
 
-* [ ] **2026-02-02**: Buildroot 配置 (`qemu_x86_64_defconfig`)，尝试初次编译。
-* [ ] **2026-02-04**: 编写 `run_qemu.sh`，实现一键启动并验证 PCI 设备扫描。
+* [x] **2026-02-02**: Buildroot 配置 (`qemu_x86_64_defconfig`)，尝试初次编译。
+* [x] **2026-02-04**: 编写 `run_qemu.sh`，实现一键启动并验证 PCI 设备扫描。
 
+* [x] **2026-02-02**: Buildroot 初始配置 (`qemu_x86_64_defconfig`)。
+
+* [x] **2026-02-03**: 深度内核裁剪。
+
++ 移除多媒体支持 (Sound/Video)、无线网络 (Wireless/Bluetooth)。
+
++ 移除 IPv6 协议栈与 Netfilter 防火墙，保留基础 TCP/IP, IPV4协议栈。
+
++ 移除 USB 子系统：为 P3/P4 阶段的性能分析构建纯净环境，消除 USB 轮询中断干扰。
+
++ 成果：内核体积压缩至 4.4 MB。
 ---
 
 ## 🚀 快速开始 (Quick Start)
