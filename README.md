@@ -51,27 +51,30 @@ Linux-PCIe-DMA-Driver/
 
 ## 📅 开发进度日志 (DevLog)
 
-### P0: 环境准备与预研 (Preparation)
+### P0: 环境准备与预研
 
 * [x] **2026-01-30**: 初始化 GitHub 仓库，建立符合工业规范的目录结构。
 * [x] **2026-01-31**: 下载 Linux 5.15 和 Buildroot 源码，配置 `.gitignore` 规则。
 
-### P1: BSP 构建 (System Build)
-
-* [x] **2026-02-02**: Buildroot 配置 (`qemu_x86_64_defconfig`)，尝试初次编译。
-* [x] **2026-02-04**: 编写 `run_qemu.sh`，实现一键启动并验证 PCI 设备扫描。
+### P1: BSP 构建
 
 * [x] **2026-02-02**: Buildroot 初始配置 (`qemu_x86_64_defconfig`)。
-
 * [x] **2026-02-03**: 深度内核裁剪。
-
 + 移除多媒体支持 (Sound/Video)、无线网络 (Wireless/Bluetooth)。
-
 + 移除 IPv6 协议栈与 Netfilter 防火墙，保留基础 TCP/IP, IPV4协议栈。
-
 + 移除 USB 子系统：为 P3/P4 阶段的性能分析构建纯净环境，消除 USB 轮询中断干扰。
-
 + 成果：内核体积压缩至 4.4 MB。
+
+### P2: 驱动骨架与开发环境搭建
+
+* [x] **2026-02-03**: 树外编译环境 (Out-of-Tree Build) 搭建。
++ 建立独立驱动目录 driver/，编写通用 Makefile，解耦内核源码与驱动代码。
++ 解决交叉编译问题：修正 Host GCC (9.4) 与 Buildroot GCC (12.4) 版本不匹配导致的 ABI 兼容性错误 (-ftrivial-auto-var-init)。
+* [x] **2026-02-03**: 部署与验证闭环。
++ 配置 BR2_ROOTFS_OVERLAY 机制，实现 .ko 文件自动打包至 Rootfs。
++ 解决 Buildroot 构建缓存导致的 Overlay 不更新问题 (手动清理 output/target)。
++ 上板验证：成功执行 insmod 加载模块，通过 dmesg 观测到主设备号分配成功，确认 lspci 能够识别 QEMU EDU 设备物理存在。
+
 ---
 
 ## 🚀 快速开始 (Quick Start)
