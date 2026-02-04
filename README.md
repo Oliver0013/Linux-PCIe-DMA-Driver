@@ -37,7 +37,7 @@ Linux-PCIe-DMA-Driver/
 
 ## 🛠️ 技术栈 (Tech Stack)
 
-* **Kernel:** Linux 5.15 LTS (or newer)
+* **Kernel:** Linux 6.1.44 LTS
 * **Build System:** Buildroot / Makefile
 * **Hypervisor:** QEMU (x86_64 target)
 * **Driver Features:**
@@ -54,7 +54,7 @@ Linux-PCIe-DMA-Driver/
 ### P0: 环境准备与预研
 
 * [x] **2026-01-30**: 初始化 GitHub 仓库，建立符合工业规范的目录结构。
-* [x] **2026-01-31**: 下载 Linux 5.15 和 Buildroot 源码，配置 `.gitignore` 规则。
+* [x] **2026-01-31**: 部署 Buildroot 开发环境，配置 `.gitignore` 规则。
 
 ### P1: BSP 构建
 
@@ -74,6 +74,10 @@ Linux-PCIe-DMA-Driver/
 + 配置 BR2_ROOTFS_OVERLAY 机制，实现 .ko 文件自动打包至 Rootfs。
 + 解决 Buildroot 构建缓存导致的 Overlay 不更新问题 (手动清理 output/target)。
 + 上板验证：成功执行 insmod 加载模块，通过 dmesg 观测到主设备号分配成功，确认 lspci 能够识别 QEMU EDU 设备物理存在。
+* [x] **2026-02-04**: 实现 PCI 探测框架 (Probing Framework)。
++ 定义 pci_device_id 过滤表，精准匹配 QEMU EDU 设备 (1234:11e8)。
++ 注册 pci_driver 结构体，实现 probe 与 remove 回调接口。
++ 里程碑：通过 dmesg 确认驱动与硬件自动匹配成功，标志着 PCI 拓扑探测链路完整。
 
 ---
 
