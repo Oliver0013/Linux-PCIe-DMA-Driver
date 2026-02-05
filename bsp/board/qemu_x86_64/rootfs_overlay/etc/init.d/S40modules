@@ -1,0 +1,8 @@
+#!/bin/sh
+case "$1" in
+  start)
+    echo "Starting Cold-plug device scanning..."
+    # 强制内核根据已存在的硬件 ID 去 modules.alias 中寻找匹配项
+    find /sys/devices -name "modalias" | xargs -r cat | xargs -r modprobe -a 2>/dev/null
+    ;;
+esac

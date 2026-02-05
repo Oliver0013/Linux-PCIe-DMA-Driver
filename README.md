@@ -16,22 +16,39 @@
 
 ```text
 Linux-PCIe-DMA-Driver/
-├── bsp/                    # BSP (Board Support Package) 构建相关
-│   └── configs/            # Buildroot 的 defconfig 配置文件
-├── driver/                 # Linux 内核驱动源码
-│   ├── pcie_edu.c          # 驱动核心代码 (Probe, DMA, ISR)
-│   ├── pcie_edu.h          # 寄存器定义与数据结构
-│   └── Makefile            # 内核模块构建脚本
-├── user_app/               # 用户态测试与交互程序
-│   ├── test_rw.c           # 基础读写测试
-│   └── benchmark.py        # 性能基准测试脚本
-├── scripts/                # 自动化辅助脚本
-│   ├── run_qemu.sh         # QEMU 一键启动脚本
-│   └── load_driver.sh      # 驱动加载与设备节点创建脚本
-├── docs/                   # 技术文档与学习笔记
-│   ├── edu_datasheet.txt   # QEMU EDU 设备规范
-│   └── dev_notes.md        # 开发过程中的踩坑记录
-└── README.md               # 项目主文档
+├── .gitignore              # [配置] Git 忽略规则
+├── Makefile                # [构建] 顶层指挥官 Makefile
+├── README.md               # [文档] 项目主页
+│
+├── buildroot/              # [第三方] Buildroot 源码 (建议作为子模块或独立目录)
+│   ├── output/             # [垃圾] 编译产物 (被 gitignore)
+│   └── ...
+│
+├── bsp/                    # [板级支持] Board Support Package
+│   ├── configs/            # [配置] 你的 defconfig (如 my_qemu_defconfig)
+│   └── board/
+│       └── qemu_x86_64/
+│           ├── rootfs_overlay/   # [关键] 你的 Overlay 目录
+│           │   ├── etc/init.d/S40modules
+│           │   └── root/         # 驱动 ko 和测试程序将部署到这里
+│           └── post-build.sh     # (可选) 构建后钩子
+│
+├── driver/                 # [内核态] 驱动源码
+│   ├── pcie_edu.c
+│   ├── pcie_edu.h
+│   └── Makefile            # 驱动编译脚本
+│
+├── user_app/               # [用户态] 测试程序 (P4 阶段重点)
+│   ├── test_rw.c           # C 语言读写测试
+│   └── benchmark.py        # Python 性能测试
+│
+├── scripts/                # [工具] 辅助脚本
+│   ├── run_qemu.sh         # QEMU 启动命令封装
+│   └── load_driver.sh      # (可选) 手动调试用，自动加载已由 S40 完成
+│
+└── docs/                   # [文档]
+    ├── edu_datasheet.txt
+    └── dev_notes.md
 
 ```
 
@@ -74,10 +91,22 @@ Linux-PCIe-DMA-Driver/
 + 配置 BR2_ROOTFS_OVERLAY 机制，实现 .ko 文件自动打包至 Rootfs。
 + 解决 Buildroot 构建缓存导致的 Overlay 不更新问题 (手动清理 output/target)。
 + 上板验证：成功执行 insmod 加载模块，通过 dmesg 观测到主设备号分配成功，确认 lspci 能够识别 QEMU EDU 设备物理存在。
-* [x] **2026-02-04**: 实现 PCI 探测框架 (Probing Framework)。
+* [x] **2026-02-04**: 实现 PCI 探测框架与自动化加载。
 + 定义 pci_device_id 过滤表，精准匹配 QEMU EDU 设备 (1234:11e8)。
 + 注册 pci_driver 结构体，实现 probe 与 remove 回调接口。
-+ 里程碑：通过 dmesg 确认驱动与硬件自动匹配成功，标志着 PCI 拓扑探测链路完整。
++ 引入 MODULE_DEVICE_TABLE 导出二进制别名。对齐目标机内核版本 (6.1.44)，利用宿主机 depmod 离线预生成 modules.alias 索引表。
++ 启动脚本实现冷插拔识别，在 /etc/init.d/S40modules 中部署了基于 find 与 xargs 的自动化扫描逻辑。
++ 里程碑：通过 dmesg 确认驱动与硬件自动匹配成功，能自动加载驱动模块，无需手动 insmod。
+
+### P3: 硬件资源映射与用户接口构建
+
+* [x] **2026-02-05**: 完成PCI探测函数，实现硬件资源MMIO映射。
++ 资源申请: 使用 pci_enable_device 激活设备，调用 pci_request_regions 独占 BAR 空间资源。
++ 地址映射: 通过 pci_iomap (BAR0) 将物理地址映射为内核虚拟地址 (void __iomem *)。
++ 内核验证: 在 Probe 阶段通过 ioread32 成功读取硬件 ID (0x123411e8) 及完成阶乘计算测试。
+* [x] **2026-02-05**: 字符设备子系统集成。
++ 接口绑定: 初始化 cdev 结构体，通过 file_operations 挂载 open/read 接口，完成驱动逻辑与 VFS 的对接。
++ 节点自动化: 引入 class_create 与 device_create自动创建设备节点inode，无需手动mknod。
 
 ---
 
