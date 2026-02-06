@@ -29,8 +29,9 @@ Linux-PCIe-DMA-Driver/
 │   └── board/
 │       └── qemu_x86_64/
 │           ├── rootfs_overlay/   # [关键] 你的 Overlay 目录
-│           │   ├── etc/init.d/S40modules
-│           │   └── root/         # 驱动 ko 和测试程序将部署到这里
+│           │   ├── etc/init.d/S40modules # 启动程序自动加载驱动
+                ├── lib/modules/6.1.44/extra/ # 编译后的驱动放在这里
+│           │   └── root/        # 测试程序将部署到这里
 │           └── post-build.sh     # (可选) 构建后钩子
 │
 ├── driver/                 # [内核态] 驱动源码
@@ -107,6 +108,14 @@ Linux-PCIe-DMA-Driver/
 * [x] **2026-02-05**: 字符设备子系统集成。
 + 接口绑定: 初始化 cdev 结构体，通过 file_operations 挂载 open/read 接口，完成驱动逻辑与 VFS 的对接。
 + 节点自动化: 引入 class_create 与 device_create自动创建设备节点inode，无需手动mknod。
+* [x] **2026-02-06**: 核心 I/O 实现与跨空间数据搬运。
++ 空间交互: 完成 copy_to_user (内核->用户) 与 copy_from_user (用户->内核) 的逻辑实现，打通数据传输通道。
++ 读写逻辑: 完善 edu_read (读取硬件 ID) 与 edu_write (写入阶乘寄存器) 接口，暂时与功能绑定，不使用off偏移量。
++ 应用测试: 编写并运行用户态测试脚本 (test_rw)，成功验证了 App 对底层硬件寄存器的读写控制。
+* [x] **2026-02-06**: 构建系统调试与部署策略修正。
++ 问题描述: 遭遇严重的“幽灵更新”问题——修改驱动代码并重新打包后，QEMU 运行的依然是旧版逻辑，但通过ls查看 target/ 下的文件时间戳却显示最新。
++ 排查过程: 通过 md5sum 对比哈希值，发现系统自动加载的是 /lib/modules 下的旧驱动，而构建脚本只更新了 /root 下的新驱动，导致modprobe无法加载最新驱动。
++ 解决方案: 更改Makefile，将编译完成的驱动移动至rootfs_overlay/lib/modules 下。
 
 ---
 

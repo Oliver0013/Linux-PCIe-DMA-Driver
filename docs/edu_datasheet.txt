@@ -1,0 +1,89 @@
+================================================================================
+QEMU EDU PCI Device Specification
+Rev 1.0 - 2026-02-05
+================================================================================
+
+1. GENERAL DESCRIPTION
+--------------------------------------------------------------------------------
+The QEMU EDU device is a virtual PCI device designed for educational purposes. 
+It implements a simple arithmetic unit (Factorial Calculator), a 4KB internal 
+SRAM, and a DMA engine capable of transferring data between system memory and 
+internal storage. It supports MSI/MSI-X interrupts.
+
+2. PCI CONFIGURATION SPACE
+--------------------------------------------------------------------------------
+Vendor ID:      0x1234
+Device ID:      0x11e8
+Class Code:     0x00ff00 (Unclassified device)
+Revision ID:    0x10
+
+Resources:
+  BAR0:         MMIO, 1MB size (Non-prefetchable)
+                Warning: Accesses < 0x80 must be 4-byte aligned (32-bit).
+
+3. MEMORY MAP (BAR0 Offset)
+--------------------------------------------------------------------------------
+Base Address:   Value stored in BAR0 (Physical Address)
+Mapped Size:    1 MB
+
+Offset  | Type | Name              | Description
+--------|------|-------------------|--------------------------------------------
+0x00    | RO   | IDENTIFICATION    | Magic Value: 0xRRrr00edu (e.g., 0x123411e8)
+0x04    | RW   | LIVENESS_CHECK    | Write X, Read ~X (Bitwise Inversion)
+0x08    | RW   | FACTORIAL         | Write N to start N!. Read result when done.
+0x20    | RW   | STATUS            | Device Status Register (See Bit Defs)
+0x24    | RO   | INT_STATUS        | Interrupt Status (Read to know cause)
+0x60    | WO   | INT_RAISE         | Debug: Write to manually trigger IRQ
+0x64    | WO   | INT_ACK           | Write to Acknowledge/Clear Interrupt
+0x80    | RW   | DMA_SRC_ADDR      | DMA Source Address (Low 32-bit / 64-bit)
+0x88    | RW   | DMA_DST_ADDR      | DMA Destination Address (Low 32-bit / 64-bit)
+0x90    | RW   | DMA_COUNT         | Number of bytes to transfer
+0x98    | RW   | DMA_CMD           | DMA Command Register (Trigger & Config)
+
+0x40000 | RW   | INTERNAL_RAM      | 4KB Internal SRAM Buffer (Start Offset)
+
+4. REGISTER BIT DEFINITIONS
+--------------------------------------------------------------------------------
+
+[0x20] STATUS Register
+  Bit 0 (0x01): BUSY (1 = Computing Factorial, 0 = Idle)
+  Bit 7 (0x80): IRQ_ENABLE_FACT (1 = Raise IRQ after factorial computation)
+
+[0x24] INT_STATUS Register
+  Bit 0 (0x01): FACT_IRQ (Factorial calculation finished)
+  Bit 8 (0x100): DMA_IRQ (DMA transfer finished)
+
+[0x98] DMA_CMD Register
+  Bit 0 (0x01): START_DMA (Write 1 to start transfer)
+  Bit 1 (0x02): DIRECTION (0 = RAM->Device, 1 = Device->RAM)
+  Bit 2 (0x04): IRQ_ENABLE_DMA (1 = Raise IRQ after transfer)
+
+5. OPERATION GUIDE
+--------------------------------------------------------------------------------
+
+5.1 Factorial Calculation (Polled Mode)
+  1. Write integer N to FACTORIAL (0x08).
+  2. Poll STATUS (0x20) until Bit 0 is 0.
+  3. Read result from FACTORIAL (0x08).
+
+5.2 Factorial Calculation (Interrupt Mode)
+  1. Set Bit 7 in STATUS (0x20) to enable Interrupts.
+  2. Write integer N to FACTORIAL (0x08).
+  3. Wait for IRQ.
+  4. In ISR: Check INT_STATUS (0x24) for Bit 0.
+  5. In ISR: Write to INT_ACK (0x64) to clear IRQ.
+  6. Read result from FACTORIAL (0x08).
+
+5.3 DMA Transfer
+  1. Set DMA_SRC_ADDR (0x80) -> Physical Address of Source.
+  2. Set DMA_DST_ADDR (0x88) -> Physical Address of Destination.
+     (Note: To use Internal RAM, use Device Address, usually internal logic handles offset)
+  3. Set DMA_COUNT (0x90) -> Size in bytes.
+  4. Write to DMA_CMD (0x98) -> (START | DIR | IRQ_ENABLE).
+
+6. NOTES FOR DRIVER DEVELOPERS
+--------------------------------------------------------------------------------
+- Endianness: The device is Little Endian.
+- Alignment: Registers < 0x80 must be accessed as 32-bit words (ioread32).
+- IO Remapping: Drivers must use pci_iomap() to map BAR0 physical address 
+  to Kernel Virtual Address before accessing registers.

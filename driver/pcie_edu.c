@@ -5,6 +5,7 @@
 #include <linux/pci.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
+#include <linux/uaccess.h>
 //模块信息
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("OLIVER");
@@ -17,6 +18,9 @@ MODULE_VERSION("0.1");
 //宏定义设备的ID，llspci -v得
 #define EDU_VENDOR_ID 0x1234
 #define EDU_DEVICE_ID 0x11e8
+//宏定义测试用的寄存器偏移
+#define EDU_REG_ID 0x00
+#define EDU_REG_FACTORIAL 0x08
 
 //全局变量
 static dev_t dev_number;//设备号
@@ -30,20 +34,56 @@ static int edu_open(struct inode *inode, struct file *file) {
     printk(KERN_INFO "[EDU] Device file opened.\n");
     return 0;
 }
-
+//读硬件ID操作
 static ssize_t edu_read(struct file *file, char __user *buf, size_t len, loff_t *off) {
     u32 id_val;
-    // 演示：当用户 read 时，我们去读硬件 ID
-    id_val = ioread32(edu_mmio_base + 0x00);
+    unsigned long copy_status;
+    //1. 字符设备模拟EOF
+    if (*off > sizeof(u32)) return 0;
+    //2. 检查硬件还是否存在
+    if (!edu_mmio_base) {
+        //硬件错误
+        return -EIO;
+    }
+    //3. 读硬件ID
+    id_val = ioread32(edu_mmio_base + EDU_REG_ID);
     printk(KERN_INFO "[EDU] User reading... Hardware ID is 0x%x\n", id_val);
-    // 这里暂时不写 copy_to_user，仅做内核验证
-    return 0;
+    //4. 数据从内核区搬到用户区
+    copy_status = copy_to_user(buf, &id_val, sizeof(id_val));
+    if (copy_status){
+        //用户虚拟地址错误
+        return -EFAULT;
+    }
+    //5. 更新文件偏移量，并返回读取的字节数
+    *off += sizeof(u32);
+    return sizeof(u32);
+}
+//写操作
+static ssize_t edu_write(struct file *file, const char __user *buf, size_t len, loff_t *off){
+    u32 user_val;
+    unsigned long copy_status;
+    //*off = 0;
+    //1. 检查传过来的数据长度
+    if (len < sizeof(u32)) return -EINVAL;
+    //2. 数据从用户区搬到内核区
+    copy_status = copy_from_user(&user_val, buf, sizeof(u32));
+    printk(KERN_INFO "[EDU] User wrote: %u. Writing to Factorial Reg...\n", user_val);
+    //出错则是用户区地址出错
+    if (copy_status) return -EFAULT;
+    //3. 检查硬件是否存在，不存在返回硬件io错误
+    if (!edu_mmio_base) return -EIO;
+    //4. 写入硬件
+    iowrite32(user_val, edu_mmio_base + EDU_REG_FACTORIAL);
+    //5. 返回写的长度
+    return sizeof(u32);
+
 }
 //定义文件操作
 static struct file_operations edu_fops = {
     .owner = THIS_MODULE,
     .open = edu_open,
     .read = edu_read,
+    .write = edu_write,
 };
 
 
@@ -91,7 +131,7 @@ static int edu_probe(struct pci_dev *pdev, const struct pci_device_id *id){
     edu_class = class_create(THIS_MODULE, "edu_class");
     edu_device = device_create(edu_class,NULL,dev_number,NULL,DRIVER_NAME);
 
-    printk(KERN_INFO "[EDU DRIVER] Probe called. Found device vender: 0x%x Device: 0x%x\n.", id->vendor, id->device);
+    printk(KERN_INFO "[EDU DRIVER V2] Probe called. Found device vender: 0x%x Device: 0x%x\n.", id->vendor, id->device);
     return 0;
 }
 

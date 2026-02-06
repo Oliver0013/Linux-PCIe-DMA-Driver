@@ -200,6 +200,51 @@
 - **计算功能**: `dmesg` 打印出 `[EDU] 5! result: 120`，证明寄存器写操作有效。
 - **接口可见性**: `ls -l /dev/edu_driver` 显示设备节点已自动生成，且主设备号与 `/proc/devices` 一致。
 
+这是非常精彩的一段经历！你不仅完成了驱动的核心功能开发（读写逻辑），还解决了一个**极具隐蔽性**的构建系统 Bug。这种“幽灵更新”的问题是嵌入式工程师从入门到进阶的必经之路，把它写进日志里非常有含金量。
+
+我已将你的 P3 阶段工作（I/O 实现）和你刚刚解决的构建系统 Bug（幽灵驱动）合并整理。你可以直接使用这段标准化的工程日志：
+
+### 📅 **P3续: 核心 I/O 实现与构建系统调试**
+
+**时间**: 2026-02-06 **关键词**: `copy_to_user`, `loff_t`, `Build Consistency`, `md5sum`, `Makefile`
+
+#### 1. 关键产出 (Key Outputs)
+
+- **跨空间数据搬运**: 完成了内核空间与用户空间的数据交互，实现了标准的 `read` (获取硬件ID) 和 `write` (设置阶乘输入) 接口。
+- **功能绑定式 I/O**: 实现了基于功能的读写逻辑。当前设计中 `read()` 和`write()`**暂不依赖**文件偏移量 (`loff_t`) 进行动态寻址。
+- **全链路测试通过**: 编写用户态测试工具 `test_rw`，成功验证了 App -> VFS -> Driver -> Hardware 的完整控制链路。
+- **构建系统修复**: 彻底解决了 Buildroot 环境下驱动更新不生效（幽灵驱动）的问题，实现了“所见即所得”的开发环境。
+
+#### 2. 核心操作与决策 (Technical Decisions)
+
+- **安全的数据传输**:
+  - **操作**: 使用 `copy_to_user` / `copy_from_user` 替代内存拷贝。
+  - **决策理由**: 用户空间内存可能被换出 (Swapped out) 或无效。内核提供的这两个函数能自动检查指针合法性，并处理缺页异常 (Page Fault)，防止内核 Panic。
+- **部署策略调整**:
+  - **操作**: 修改顶层 `Makefile`，将原本部署到 `/root` (调试区)的驱动， 移动至 `/lib/modules/$(uname -r)/extra` (系统区)。
+  - **决策理由**:
+    - `/lib/modules`: 确保系统启动脚本 (`Sxx_modules`) 和 `modprobe` 能加载到最新驱动。
+
+#### 3. 踩坑记录 (Troubleshooting) —— **重点难点**
+
+- **Bug: “幽灵更新” (The Ghost Driver Bug)**
+  - **现象**: 修改了驱动代码（增加调试打印、修改逻辑），执行 `make deploy image run` 后，QEMU 中的运行行为依然是旧版逻辑。但宿主机查看 `output/target/` 下的文件时间戳显示为最新。
+  - **排查过程**:
+    1. **怀疑编译**: 检查 `.o` 文件时间，确认为新编译。
+    2. **怀疑打包**: 检查 `target/` 目录，也就是buildroot的懒加载，直接make不会重新打包，但是通过ls -lh确认文件已更新。
+    3. **锁定真凶**: 在 QEMU 内分别对 `/root/pcie_edu.ko` 和 `/lib/modules/.../pcie_edu.ko` 执行 `md5sum`。
+    4. **发现**: `/root` 下是新哈希值，`/lib/modules` 下是旧哈希值。
+  - **根因分析**:
+    - Buildroot 首次编译时在 `/lib/modules` 生成了驱动。
+    - 启动脚本使用 `modprobe` 加载驱动，`modprobe` 只检索 `/lib/modules`。
+    - 之前的构建脚本 (`deploy`) 仅将新驱动更新到了 `/root` 目录，导致系统启动时“视而不见”，加载了旧的“僵尸”驱动。
+  - **解决**: 重构 `Makefile` 的 `deploy` 目标，强制覆盖 `/lib/modules` 下的旧文件。
+
+#### 4. 阶段性验证 (Validation)
+
+- **一致性验证**: `md5sum /root/pcie_edu.ko` 与 `md5sum /lib/modules/.../pcie_edu.ko` 输出一致。
+- **功能验证**: 运行 `./test_rw`
+
 ------
 
 ### 面试话术沉淀 (Resume Speak)
@@ -707,3 +752,4 @@ VFS 采用面向对象的设计思想，将文件系统操作抽象为四个主�
 
 ------
 
+md5sum哈希值
