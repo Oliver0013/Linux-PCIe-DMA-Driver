@@ -9,12 +9,21 @@
 #define EDU_VENDOR_ID 0x1234
 #define EDU_DEVICE_ID 0x11e8
 
-// --- 寄存器偏移 (EDU Spec) ---
-#define EDU_REG_ID          0x00
-#define EDU_REG_ALIVE       0x04
-#define EDU_REG_FACTORIAL   0x08
-#define EDU_REG_STATUS      0x20  // 中断状态/使能
-#define EDU_REG_IRQ_ACK     0x24  // 中断应答/清除
+// --- 寄存器映射 (BAR0 Offset) ---
+#define EDU_REG_ID          0x00    // IDENTIFICATION (RO)
+#define EDU_REG_ALIVE       0x04    // LIVENESS_CHECK (RW)
+#define EDU_REG_FACTORIAL   0x08    // FACTORIAL (RW)
+#define EDU_REG_STATUS      0x20    // STATUS (RW)
+#define EDU_REG_INT_STATUS  0x24    // INT_STATUS (RO) - 读中断原因
+#define EDU_REG_INT_RAISE   0x60    // INT_RAISE (WO) - 手动触发中断
+#define EDU_REG_INT_ACK     0x64    // INT_ACK (WO) - 【修正】写入以清除中断
+
+// --- 寄存器位定义 ---
+#define STATUS_BUSY         0x01    // Bit 0: 0x20 寄存器，计算中
+#define STATUS_IRQ_EN      0x80    // Bit 7: 0x20 寄存器，开启阶乘完成中断
+
+#define INT_STATUS_FACT     0x01    // Bit 0: 0x24 寄存器，阶乘计算完成中断标志
+#define INT_STATUS_DMA      0x100   // Bit 8: 0x24 寄存器，DMA 完成中断标志
 
 // --- 驱动配置 ---
 #define DRIVER_NAME "edu_driver"

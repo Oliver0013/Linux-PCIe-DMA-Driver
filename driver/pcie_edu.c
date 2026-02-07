@@ -7,6 +7,7 @@
 #include <linux/device.h>
 #include <linux/uaccess.h>
 #include "pcie_edu.h"
+#include <linux/wait.h>
 //模块信息
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("OLIVER");
@@ -19,6 +20,30 @@ MODULE_VERSION("0.1");
 
 //全局变量
 static dev_t dev_number;//设备号
+
+//----------中断服务程序ISR------------
+//dev就是request_irq传入的最后一个参数
+static irqreturn_t edu_isr(int irq, void *dev){
+    struct edu_device *edu = (struct edu_device *)dev;
+    u32 int_status;
+
+    //查询中断原因寄存器
+    int_status = ioread32(edu->mmio_base + EDU_REG_INT_STATUS);
+    if (!int_status) return IRQ_NONE;
+
+    //检查是否是阶乘中断
+    if (int_status && INT_STATUS_FACT){
+        //清除中断
+        iowrite32(INT_STATUS_FACT, edu->mmio_base + EDU_REG_INT_ACK);
+        edu->fact_ready = 1;
+        //唤醒等待队列的进程
+        wake_up_interruptible(&edu->wait_q);
+        return IRQ_HANDLED;
+    }
+    return IRQ_NONE;
+}
+
+
 
 //-----------文件操作函数----------
 static int edu_open(struct inode *inode, struct file *file) {
@@ -33,25 +58,39 @@ static int edu_open(struct inode *inode, struct file *file) {
 //读硬件ID操作
 static ssize_t edu_read(struct file *file, char __user *buf, size_t len, loff_t *off) {
     struct edu_device *edu = file->private_data;
-    u32 id_val;
+    u32 val;
     unsigned long copy_status;
-    //1. 字符设备模拟EOF
-    if (*off > sizeof(u32)) return 0;
-    //2. 检查硬件还是否存在
+    //检查硬件还是否存在
     if (!edu->mmio_base) {
         //硬件错误
         return -EIO;
     }
-    //3. 读硬件ID
-    id_val = ioread32(edu->mmio_base + EDU_REG_ID);
-    printk(KERN_INFO "[EDU] User reading... Hardware ID is 0x%x\n", id_val);
-    //4. 数据从内核区搬到用户区
-    copy_status = copy_to_user(buf, &id_val, sizeof(id_val));
+    //根据偏移量分发任务
+    switch(*off) {
+        case EDU_REG_ID: //读取ID（非阻塞）
+            val = ioread32(edu->mmio_base + EDU_REG_ID);
+            break;
+        case EDU_REG_FACTORIAL: //读取阶乘结果（阻塞）
+            if (wait_event_interruptible(edu->wait_q, edu->fact_ready == 1)){
+                return -ERESTARTSYS;
+            }
+            //重置计算标志位
+            edu->fact_ready = 0;
+            //读计算完的阶乘
+            val = ioread32(edu->mmio_base + EDU_REG_FACTORIAL);
+            break;
+        default:
+            return -EINVAL;
+    }
+
+    printk(KERN_INFO "[EDU] Read Offset 0x%llx, Value: 0x%x\n", *off, val);
+    //数据从内核区搬到用户区
+    copy_status = copy_to_user(buf, &val, sizeof(u32));
     if (copy_status){
         //用户虚拟地址错误
         return -EFAULT;
     }
-    //5. 更新文件偏移量，并返回读取的字节数
+    //更新文件偏移量，并返回读取的字节数
     *off += sizeof(u32);
     return sizeof(u32);
 }
@@ -60,7 +99,6 @@ static ssize_t edu_write(struct file *file, const char __user *buf, size_t len, 
     struct edu_device *edu = file->private_data;
     u32 user_val;
     unsigned long copy_status;
-    //*off = 0;
     //1. 检查传过来的数据长度
     if (len < sizeof(u32)) return -EINVAL;
     //2. 数据从用户区搬到内核区
@@ -69,10 +107,14 @@ static ssize_t edu_write(struct file *file, const char __user *buf, size_t len, 
     //出错则是用户区地址出错
     if (copy_status) return -EFAULT;
     //3. 检查硬件是否存在，不存在返回硬件io错误
-    if (!edu->mmio_base) return -EIO;
-    //4. 写入硬件
+    if (!edu) return -EIO;
+    //4. 中断使能
+    iowrite32(STATUS_IRQ_EN, edu->mmio_base+EDU_REG_STATUS);
+    //5. 重置计算标记位
+    edu->fact_ready = 0;
+    //6. 写入硬件
     iowrite32(user_val, edu->mmio_base + EDU_REG_FACTORIAL);
-    //5. 返回写的长度
+    //7. 返回写的长度
     return sizeof(u32);
 
 }
@@ -89,7 +131,7 @@ static struct file_operations edu_fops = {
 //1. probe函数，检测到硬件自动调用该函数
 static int edu_probe(struct pci_dev *pdev, const struct pci_device_id *id){
     int ret;
-    
+
     //0. 创建设备实例
     struct edu_device *edu;
     // 为设备申请堆空间，清空，GFP_KERNEL代表会等待有空间了才分配
@@ -117,6 +159,15 @@ static int edu_probe(struct pci_dev *pdev, const struct pci_device_id *id){
         ret = -ENOMEM;
         goto err_regions;
     }
+
+    //3. 中断相关
+    //a. 初始化等待队列
+    init_waitqueue_head(&edu->wait_q);
+    edu->fact_ready = 0;
+    //b. 注册中断
+    ret = request_irq(pdev->irq, edu_isr, IRQF_SHARED, DRIVER_NAME, edu);
+    if (ret) goto err_iounmap;
+
     
     //4. 初始化注册字符设备
     //初始化cdev结构，与fops关联
@@ -124,7 +175,7 @@ static int edu_probe(struct pci_dev *pdev, const struct pci_device_id *id){
     cdev_init(&edu->cdev, &edu_fops);
     //告知内核cdev，并与申请好的设备号绑定
     ret = cdev_add(&edu->cdev, edu->dev_num, 1);
-    if (ret) goto err_iounmap;
+    if (ret) goto err_irq;
 
     //5. 创建节点inode
     edu->class = class_create(THIS_MODULE, "edu_class");
@@ -147,6 +198,8 @@ err_class:
     class_destroy(edu->class);
 err_cdev:
     cdev_del(&edu->cdev);
+err_irq:
+    free_irq(pdev->irq, edu);
 err_iounmap:
     pci_iounmap(pdev, edu->mmio_base);
 err_regions:
@@ -162,21 +215,23 @@ err_free:
 static void edu_remove(struct pci_dev *pdev){
     struct edu_device *edu;
     edu = pci_get_drvdata(pdev);
-    //删除设备节点
-    device_destroy(edu->class, edu->dev_num);
-    class_destroy(edu->class);
-    //删除字符设备
-    cdev_del(&edu->cdev);
-    //1. 取消虚拟地址映射
-    if (edu->mmio_base){
+    if (edu){
+        //删除设备节点
+        device_destroy(edu->class, edu->dev_num);
+        class_destroy(edu->class);
+        //删除字符设备
+        cdev_del(&edu->cdev);
+        //取消中断
+        free_irq(pdev->irq, edu);
+        //取消虚拟地址映射
         pci_iounmap(pdev, edu->mmio_base);
+        //取消BAR资源
+        pci_release_regions(pdev);
+        //关闭设备
+        pci_disable_device(pdev);
+        //释放内存
+        kfree(edu);       
     }
-    //2. 取消BAR资源
-    pci_release_regions(pdev);
-    //3. 关闭设备
-    pci_disable_device(pdev);
-    //释放内存
-    kfree(edu);
     printk(KERN_INFO "[EDU_DRIVER] Device removed and unmapped.\n");
 }
 //3. 驱动支持的设备号表，表内存放的数据结构是struct pci_device_id

@@ -31,7 +31,7 @@ Offset  | Type | Name              | Description
 0x00    | RO   | IDENTIFICATION    | Magic Value: 0xRRrr00edu (e.g., 0x123411e8)
 0x04    | RW   | LIVENESS_CHECK    | Write X, Read ~X (Bitwise Inversion)
 0x08    | RW   | FACTORIAL         | Write N to start N!. Read result when done.
-0x20    | RW   | STATUS            | Device Status Register (See Bit Defs)
+0x20    | RW   | STATUS            | 0x01Computing Factorial判断是否计算完阶乘，0x80中断使能开关
 0x24    | RO   | INT_STATUS        | Interrupt Status (Read to know cause)
 0x60    | WO   | INT_RAISE         | Debug: Write to manually trigger IRQ
 0x64    | WO   | INT_ACK           | Write to Acknowledge/Clear Interrupt

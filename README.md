@@ -124,6 +124,14 @@ Linux-PCIe-DMA-Driver/
 + 动态生命周期：放弃全局变量，在 probe 中使用 kzalloc 动态分配实例内存，在 remove 中通过 kfree 回收，修复了潜在的内存泄漏与多设备冲突风险。
 + 上下文纽带：通过 pci_set_drvdata 建立硬件与实例的绑定；在 open 阶段利用 container_of 逆向寻址，并通过 file->private_data 实现文件操作流的实例跟踪。
 + 意义：完成了从“单例驱动”向“工业级多实例驱动”的跨越，为 wait_queue 的植入提供了合法的内存宿主。
+* [x] **2026-02-07**: 中断处理 (ISR) 与异步通知机制。
++ 硬件协议修正: 查阅 QEMU 官方文档，修正寄存器定义偏差。确认 Status Register 为 0x20，Interrupt ACK Register 为 0x64（Write Only）。
++ ISR 实现: 实现 edu_isr 底半部处理。使用 ioread32 识别中断源，使用 iowrite32 向 ACK 寄存器写入对应位以清除中断，防止中断风暴。
++ 阻塞机制: 引入 wait_queue_head_t。在 read 接口中使用 wait_event_interruptible 替代轮询，实现进程在无数据时的睡眠等待（TASK_INTERRUPTIBLE）。
+* [x] **2026-02-07**: 死锁修复与 I/O 模型增强。
++ 应用层死锁分析: 发现测试程序先 Read 后 Write 导致的逻辑死锁（Read 阻塞等待 Write 触发的数据，而 Write 永远无法执行），根源在于驱动将所有 Read 操作均视为阻塞的阶乘结果读取。
++ 地址分发: 重构 read 接口，引入基于 loff_t 的地址路由机制 (switch-case)。实现 0x00 (ID) 非阻塞读取与 0x08 (Factorial) 阻塞等待的任务分离。
++ 原子化访问验证: 测试端引入 pread 系统调用，替代了非原子的 lseek + read 组合，消除了多线程下的文件指针竞态风险，成功验证了驱动对随机标准的兼容性。
 ---
 
 ## 🚀 快速开始 (Quick Start)
