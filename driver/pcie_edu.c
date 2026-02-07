@@ -6,6 +6,7 @@
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/uaccess.h>
+#include "pcie_edu.h"
 //模块信息
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("OLIVER");
@@ -15,38 +16,34 @@ MODULE_VERSION("0.1");
 //宏定义设备名称，出现在/proc/devices里
 #define DRIVER_NAME "edu_driver"
 
-//宏定义设备的ID，llspci -v得
-#define EDU_VENDOR_ID 0x1234
-#define EDU_DEVICE_ID 0x11e8
-//宏定义测试用的寄存器偏移
-#define EDU_REG_ID 0x00
-#define EDU_REG_FACTORIAL 0x08
 
 //全局变量
 static dev_t dev_number;//设备号
-static struct cdev edu_cdev;//字符设备
-static void __iomem *edu_mmio_base;//硬件操作基地址
-static struct class *edu_class;
-static struct device *edu_device;
 
 //-----------文件操作函数----------
 static int edu_open(struct inode *inode, struct file *file) {
+    struct edu_device *edu;
+    //edu的地址：通过inode指向的i_cdev对应于edu_device中的cdev字段
+    edu = container_of(inode->i_cdev, struct edu_device, cdev);
+    //把文件的私有数据指向edu
+    file->private_data = edu;
     printk(KERN_INFO "[EDU] Device file opened.\n");
     return 0;
 }
 //读硬件ID操作
 static ssize_t edu_read(struct file *file, char __user *buf, size_t len, loff_t *off) {
+    struct edu_device *edu = file->private_data;
     u32 id_val;
     unsigned long copy_status;
     //1. 字符设备模拟EOF
     if (*off > sizeof(u32)) return 0;
     //2. 检查硬件还是否存在
-    if (!edu_mmio_base) {
+    if (!edu->mmio_base) {
         //硬件错误
         return -EIO;
     }
     //3. 读硬件ID
-    id_val = ioread32(edu_mmio_base + EDU_REG_ID);
+    id_val = ioread32(edu->mmio_base + EDU_REG_ID);
     printk(KERN_INFO "[EDU] User reading... Hardware ID is 0x%x\n", id_val);
     //4. 数据从内核区搬到用户区
     copy_status = copy_to_user(buf, &id_val, sizeof(id_val));
@@ -60,6 +57,7 @@ static ssize_t edu_read(struct file *file, char __user *buf, size_t len, loff_t 
 }
 //写操作
 static ssize_t edu_write(struct file *file, const char __user *buf, size_t len, loff_t *off){
+    struct edu_device *edu = file->private_data;
     u32 user_val;
     unsigned long copy_status;
     //*off = 0;
@@ -71,9 +69,9 @@ static ssize_t edu_write(struct file *file, const char __user *buf, size_t len, 
     //出错则是用户区地址出错
     if (copy_status) return -EFAULT;
     //3. 检查硬件是否存在，不存在返回硬件io错误
-    if (!edu_mmio_base) return -EIO;
+    if (!edu->mmio_base) return -EIO;
     //4. 写入硬件
-    iowrite32(user_val, edu_mmio_base + EDU_REG_FACTORIAL);
+    iowrite32(user_val, edu->mmio_base + EDU_REG_FACTORIAL);
     //5. 返回写的长度
     return sizeof(u32);
 
@@ -91,65 +89,94 @@ static struct file_operations edu_fops = {
 //1. probe函数，检测到硬件自动调用该函数
 static int edu_probe(struct pci_dev *pdev, const struct pci_device_id *id){
     int ret;
-    u32 id_check;
-    //1. 启动硬件设备
+    
+    //0. 创建设备实例
+    struct edu_device *edu;
+    // 为设备申请堆空间，清空，GFP_KERNEL代表会等待有空间了才分配
+    edu = kzalloc(sizeof(struct edu_device), GFP_KERNEL);
+    if (!edu) return -ENOMEM;
+
+    //pdev和edu相互关联
+    edu->pdev = pdev;
+    pci_set_drvdata(pdev, edu);//等价于pdev->dev.driver_data = edu;
+    //设备号赋值
+    edu->dev_num = dev_number;
+
+    //1. 启动硬件设备/硬件初始化
     ret = pci_enable_device(pdev);
-    if (ret) return ret;
+    if (ret) goto err_free;
+
     //2. 申请BAR资源
     ret = pci_request_regions(pdev, DRIVER_NAME);
-    if (ret) {
-        printk(KERN_ERR "[EDU] Failed to request PCI regions\n");
-        pci_disable_device(pdev);
-        return ret;
-    }
+    if (ret) goto err_disable;
+
     //3. MMIO映射(BAR 0)物理地址映射为虚拟地址
     //pci_iomap(设备指针，BAR序号，映射长度，0代表整个区域)
-    edu_mmio_base = pci_iomap(pdev, 0, 0);
+    edu->mmio_base = pci_iomap(pdev, 0, 0);
+    if (!edu->mmio_base) {
+        ret = -ENOMEM;
+        goto err_regions;
+    }
     
-    //【关键验证】直接在 Probe 里测试硬件通信
-    id_check = ioread32(edu_mmio_base + 0x00);
-    printk(KERN_INFO "[EDU] MMIO Test: Identification Register = 0x%08x\n", id_check);
-
-    // 阶乘测试：往 0x08 写 5
-    iowrite32(5, edu_mmio_base + 0x08);
-    printk(KERN_INFO "[EDU] MMIO Test: Wrote 5 to Factorial Register. Result: %u\n", 
-           ioread32(edu_mmio_base + 0x08));
     //4. 初始化注册字符设备
     //初始化cdev结构，与fops关联
-    edu_cdev.owner = THIS_MODULE;
-    cdev_init(&edu_cdev, &edu_fops);
+    edu->cdev.owner = THIS_MODULE;
+    cdev_init(&edu->cdev, &edu_fops);
     //告知内核cdev，并与申请好的设备号绑定
-    ret = cdev_add(&edu_cdev, dev_number, 1);
-    if (ret) {
-        printk(KERN_ERR "[EDU] Failed to cdev add\n");
-        pci_iounmap(pdev, edu_mmio_base);
-        pci_release_regions(pdev);
-        pci_disable_device(pdev);
-        return ret;
-    }
+    ret = cdev_add(&edu->cdev, edu->dev_num, 1);
+    if (ret) goto err_iounmap;
+
     //5. 创建节点inode
-    edu_class = class_create(THIS_MODULE, "edu_class");
-    edu_device = device_create(edu_class,NULL,dev_number,NULL,DRIVER_NAME);
+    edu->class = class_create(THIS_MODULE, "edu_class");
+    if (IS_ERR(edu->class)) {
+        ret = PTR_ERR(edu->class);
+        goto err_cdev;
+    }
+
+    edu->device = device_create(edu->class, NULL, edu->dev_num, NULL, DRIVER_NAME);
+    if (IS_ERR(edu->device)) {
+        ret = PTR_ERR(edu->device);
+        goto err_class;
+    }
 
     printk(KERN_INFO "[EDU DRIVER V2] Probe called. Found device vender: 0x%x Device: 0x%x\n.", id->vendor, id->device);
     return 0;
+
+// --- 错误处理 ---
+err_class:
+    class_destroy(edu->class);
+err_cdev:
+    cdev_del(&edu->cdev);
+err_iounmap:
+    pci_iounmap(pdev, edu->mmio_base);
+err_regions:
+    pci_release_regions(pdev);
+err_disable:
+    pci_disable_device(pdev);
+err_free:
+    kfree(edu); // 【关键】释放内存
+    return ret;
 }
 
 //2. Remove函数
-static void edu_remove(struct pci_dev *dev){
+static void edu_remove(struct pci_dev *pdev){
+    struct edu_device *edu;
+    edu = pci_get_drvdata(pdev);
     //删除设备节点
-    device_destroy(edu_class, dev_number);
-    class_destroy(edu_class);
+    device_destroy(edu->class, edu->dev_num);
+    class_destroy(edu->class);
     //删除字符设备
-    cdev_del(&edu_cdev);
+    cdev_del(&edu->cdev);
     //1. 取消虚拟地址映射
-    if (edu_mmio_base){
-        pci_iounmap(dev, edu_mmio_base);
+    if (edu->mmio_base){
+        pci_iounmap(pdev, edu->mmio_base);
     }
     //2. 取消BAR资源
-    pci_release_regions(dev);
+    pci_release_regions(pdev);
     //3. 关闭设备
-    pci_disable_device(dev);
+    pci_disable_device(pdev);
+    //释放内存
+    kfree(edu);
     printk(KERN_INFO "[EDU_DRIVER] Device removed and unmapped.\n");
 }
 //3. 驱动支持的设备号表，表内存放的数据结构是struct pci_device_id

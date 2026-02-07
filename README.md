@@ -117,6 +117,13 @@ Linux-PCIe-DMA-Driver/
 + 排查过程: 通过 md5sum 对比哈希值，发现系统自动加载的是 /lib/modules 下的旧驱动，而构建脚本只更新了 /root 下的新驱动，导致modprobe无法加载最新驱动。
 + 解决方案: 更改Makefile，将编译完成的驱动移动至rootfs_overlay/lib/modules 下。
 
+### P4: 阻塞式 I/O 与中断处理实现
+
+* [x] **2026-02-06**: 解耦硬件实例与驱动逻辑，面向对象重构
++ 数据封装：创建 pcie_edu.h，将 MMIO 基地址、cdev、pdev 等核心成员封装进 struct edu_device。
++ 动态生命周期：放弃全局变量，在 probe 中使用 kzalloc 动态分配实例内存，在 remove 中通过 kfree 回收，修复了潜在的内存泄漏与多设备冲突风险。
++ 上下文纽带：通过 pci_set_drvdata 建立硬件与实例的绑定；在 open 阶段利用 container_of 逆向寻址，并通过 file->private_data 实现文件操作流的实例跟踪。
++ 意义：完成了从“单例驱动”向“工业级多实例驱动”的跨越，为 wait_queue 的植入提供了合法的内存宿主。
 ---
 
 ## 🚀 快速开始 (Quick Start)
