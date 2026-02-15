@@ -29,21 +29,29 @@ static dev_t dev_number;//设备号
 static irqreturn_t edu_isr(int irq, void *dev){
     struct edu_device *edu = (struct edu_device *)dev;
     u32 int_status;
+    irqreturn_t ret = IRQ_NONE; // 默认返回未处理
 
     //查询中断原因寄存器
     int_status = ioread32(edu->mmio_base + EDU_REG_INT_STATUS);
     if (!int_status) return IRQ_NONE;
 
-    //检查是否是阶乘中断
-    if (int_status && INT_STATUS_FACT){
-        //清除中断
+    // 1. 检查是否是阶乘中断
+    if (int_status & INT_STATUS_FACT) {
         iowrite32(INT_STATUS_FACT, edu->mmio_base + EDU_REG_INT_ACK);
         edu->fact_ready = 1;
-        //唤醒等待队列的进程
         wake_up_interruptible(&edu->wait_q);
-        return IRQ_HANDLED;
+        ret = IRQ_HANDLED;
     }
-    return IRQ_NONE;
+
+    // 2. 检查是否是 DMA 中断
+    if (int_status & INT_STATUS_DMA) {
+        iowrite32(INT_STATUS_DMA, edu->mmio_base + EDU_REG_INT_ACK);
+        edu->dma_ready = 1;
+        wake_up_interruptible(&edu->wait_q);
+        ret = IRQ_HANDLED;
+    }
+
+    return ret;
 }
 
 
@@ -105,12 +113,21 @@ static ssize_t edu_read(struct file *file, char __user *buf, size_t len, loff_t 
             
             // 4. 发送开始命令，并改变方向！
             // 文档中：0x01 (Start) | 0x02 (Direction: 从 EDU 到 RAM) = 0x03
-            writeq((u64)3, edu->mmio_base + EDU_REG_DMA_CMD);
+            writeq((u64)(DMA_CMD_START | DMA_CMD_DEV_RAM | DMA_CMD_IRQ_EN), edu->mmio_base + EDU_REG_DMA_CMD);
 
-            // 5. 轮询等待硬件把数据搬运回主存
-            while (readq(edu->mmio_base + EDU_REG_DMA_CMD) & 1) {
-                cpu_relax();
+            // // 5. 轮询等待硬件把数据搬运回主存
+            // while (readq(edu->mmio_base + EDU_REG_DMA_CMD) & 1) {
+            //     cpu_relax();
+            // }
+
+            // // 6. 此时数据已经躺在主机的内存里了，CPU可以直接读！
+            // val = *(u32 *)edu->dma_cpu_addr;
+            // 5. 阻塞等待 DMA 把数据搬回主存
+            if (wait_event_interruptible(edu->wait_q, edu->dma_ready == 1)){
+                return -ERESTARTSYS;
             }
+            // 清除标志位
+            edu->dma_ready = 0;
 
             // 6. 此时数据已经躺在主机的内存里了，CPU可以直接读！
             val = *(u32 *)edu->dma_cpu_addr;
@@ -162,12 +179,17 @@ static ssize_t edu_write(struct file *file, const char __user *buf, size_t len, 
             writeq((u64)edu->dma_bus_addr, edu->mmio_base + EDU_REG_DMA_SRC);
             writeq((u64)EDU_SRAM, edu->mmio_base + EDU_REG_DMA_DST);
             writeq((u64)sizeof(u32), edu->mmio_base + EDU_REG_DMA_CNT);
-            writeq((u64)DMA_CMD_START, edu->mmio_base + EDU_REG_DMA_CMD);
+            writeq((u64)(DMA_CMD_START | DMA_CMD_IRQ_EN), edu->mmio_base + EDU_REG_DMA_CMD);
 
             //等待DMA传输完毕，轮询方式
-            while (readq(edu->mmio_base + EDU_REG_DMA_CMD) & 1) {
-                cpu_relax(); // 防止 CPU 死锁
-            }        
+            // while (readq(edu->mmio_base + EDU_REG_DMA_CMD) & 1) {
+            //     cpu_relax(); // 防止 CPU 死锁
+            // }
+            //阻塞方式 
+            if (wait_event_interruptible(edu->wait_q, edu->dma_ready == 1)){
+                return -ERESTARTSYS;
+            }
+            edu->dma_ready = 0;                   
 
             break;
 
@@ -178,12 +200,68 @@ static ssize_t edu_write(struct file *file, const char __user *buf, size_t len, 
     return sizeof(u32);
 
 }
+
+static long edu_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
+    struct edu_device *edu = file->private_data;
+
+    //检查硬件是否存在？
+    if (!edu->mmio_base) return -EIO;
+
+    //根据命令分发任务
+    switch (cmd){
+        //---获取硬件ID---
+        case EDU_IOC_GET_ID:
+            u32 id_val = ioread32(edu->mmio_base + EDU_REG_ID);
+            // 将读取的 ID 拷贝到用户态 arg 指向的内存
+            if (copy_to_user((u32 __user *)arg, &id_val, sizeof(id_val))) {
+                return -EFAULT;
+            }
+            break;
+
+        // --- 命令 2：计算阶乘 ---
+        case EDU_IOC_CALC_FACT: 
+            struct edu_fact_req req;
+            
+            // 1. 把用户态的结构体拷贝到内核里来
+            if (copy_from_user(&req, (struct edu_fact_req __user *)arg, sizeof(req))) {
+                return -EFAULT;
+            }
+
+            // 2. 触发中断使能与阶乘运算
+            iowrite32(STATUS_IRQ_EN, edu->mmio_base + EDU_REG_STATUS);
+            edu->fact_ready = 0;
+            // req.val 就是用户想算的数字
+            iowrite32(req.val, edu->mmio_base + EDU_REG_FACTORIAL);
+
+            // 3. 进程休眠，等待硬件中断唤醒 (复用你完美的中断逻辑)
+            if (wait_event_interruptible(edu->wait_q, edu->fact_ready == 1)) {
+                return -ERESTARTSYS;
+            }
+            edu->fact_ready = 0; // 重置标志位
+
+            // 4. 硬件算完了，从寄存器读出结果，存入结构体的 result 字段
+            req.result = ioread32(edu->mmio_base + EDU_REG_FACTORIAL);
+
+            // 5. 把填好结果的结构体，完整地拷贝回用户态 (送货上门)
+            if (copy_to_user((struct edu_fact_req __user *)arg, &req, sizeof(req))) {
+                return -EFAULT;
+            }
+            break; 
+
+        default:
+            // 收到不认识的命令，返回标准错误码 ENOTTY
+            return -ENOTTY;              
+    }
+    return 0;  
+};
+
 //定义文件操作
 static struct file_operations edu_fops = {
     .owner = THIS_MODULE,
     .open = edu_open,
     .read = edu_read,
     .write = edu_write,
+    .unlocked_ioctl = edu_ioctl,
 };
 
 
@@ -240,6 +318,7 @@ static int edu_probe(struct pci_dev *pdev, const struct pci_device_id *id){
     //a. 初始化等待队列
     init_waitqueue_head(&edu->wait_q);
     edu->fact_ready = 0;
+    edu->dma_ready = 0;
     //b. 注册中断
     ret = request_irq(pdev->irq, edu_isr, IRQF_SHARED, DRIVER_NAME, edu);
     if (ret) goto err_dma;

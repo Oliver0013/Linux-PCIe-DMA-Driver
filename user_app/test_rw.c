@@ -2,36 +2,35 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <sys/ioctl.h>
 #include <stdint.h>
-
+#include "../driver/pcie_edu.h"
 #define DEVICE_PATH "/dev/edu_driver"
 
 int main() {
     int fd;
     uint32_t val;
-    uint32_t write_val = 5;
 
     fd = open(DEVICE_PATH, O_RDWR);
     if (fd < 0) { perror("Open"); return -1; }
 
     // --- 测试 1: 单纯查阅 ID (应该瞬间返回，不阻塞) ---
-    if (pread(fd, &val, 4, 0x00) == 4) {
-        printf("[TEST 1] Read ID (Offset 0x00): 0x%08x\n", val);
+    __u32 hardware_id = 0;
+    if (ioctl(fd, EDU_IOC_GET_ID, &hardware_id) == 0) {
+        printf("[TEST 1] ioctl Get ID: 0x%08x\n", hardware_id);
     } else {
-        perror("Read ID failed");
+        perror("ioctl GET_ID failed");
     }
 
     // --- 测试 2: 触发阶乘计算 ---
-    printf("[TEST 2] Writing %u to trigger Factorial...\n", write_val);
-    // 【修改点】：统一使用 pwrite，显式指定偏移量 0x08，防止偏移量错乱
-    if (pwrite(fd, &write_val, 4, 0x08) != 4) {
-        perror("Write Factorial failed");
-    }
+    struct edu_fact_req fact_req = { .val = 5, .result = 0 };
 
-    // --- 测试 3: 获取阶乘结果 (应该阻塞等待中断) ---
-    printf("[TEST 3] Waiting for result at Offset 0x08...\n");
-    if (pread(fd, &val, 4, 0x08) == 4) {
-        printf("[TEST 3] Read Factorial (Offset 0x08): %u (Should be 120)\n", val);
+    printf("[TEST 2/3] Calling ioctl to calculate factorial of %u...\n", fact_req.val);
+    
+    if (ioctl(fd, EDU_IOC_CALC_FACT, &fact_req) == 0) {
+        printf("[TEST 2/3] ioctl Factorial Result: %u (Should be 120)\n", fact_req.result);
+    } else {
+        perror("ioctl CALC_FACT failed");
     }
 
     // ==========================================
