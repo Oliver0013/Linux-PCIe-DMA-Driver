@@ -8,11 +8,14 @@
 #include <linux/uaccess.h>
 #include "pcie_edu.h"
 #include <linux/wait.h>
+#include <linux/dma-mapping.h>
+#include <linux/io.h>
+
 //模块信息
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("OLIVER");
 MODULE_DESCRIPTION("Qemu EDU PCIe Device Driver");
-MODULE_VERSION("0.1");
+MODULE_VERSION("0.2");
 
 //宏定义设备名称，出现在/proc/devices里
 #define DRIVER_NAME "edu_driver"
@@ -79,6 +82,40 @@ static ssize_t edu_read(struct file *file, char __user *buf, size_t len, loff_t 
             //读计算完的阶乘
             val = ioread32(edu->mmio_base + EDU_REG_FACTORIAL);
             break;
+        // 用于验证 CPU 能否直接访问这块内存
+        case 0x1000:
+            if (edu->dma_cpu_addr) {
+                // 直接从内存里读数据 (像读普通数组一样)
+                val = *(u32 *)edu->dma_cpu_addr;
+                printk(KERN_INFO "[EDU DMA] Read from DMA Buffer: 0x%x\n", val);
+            } else {
+                val = 0xDEAD0000; // 错误码
+            }
+            break;
+        // 用于验证DMA是否成功把数据写到了SRAM，我们需要用DMA把它搬回来验证
+        case 0x40000:
+            if (!edu->dma_cpu_addr) return -ENOMEM;
+
+            // 1. 设置 DMA SRC 为设备的 SRAM 地址
+            writeq((u64)EDU_SRAM, edu->mmio_base + EDU_REG_DMA_SRC);
+            // 2. 设置 DMA DST 为主机的 DMA 物理总线地址
+            writeq((u64)edu->dma_bus_addr, edu->mmio_base + EDU_REG_DMA_DST);
+            // 3. 设置搬运大小 (4字节)
+            writeq((u64)sizeof(u32), edu->mmio_base + EDU_REG_DMA_CNT);
+            
+            // 4. 发送开始命令，并改变方向！
+            // 文档中：0x01 (Start) | 0x02 (Direction: 从 EDU 到 RAM) = 0x03
+            writeq((u64)3, edu->mmio_base + EDU_REG_DMA_CMD);
+
+            // 5. 轮询等待硬件把数据搬运回主存
+            while (readq(edu->mmio_base + EDU_REG_DMA_CMD) & 1) {
+                cpu_relax();
+            }
+
+            // 6. 此时数据已经躺在主机的内存里了，CPU可以直接读！
+            val = *(u32 *)edu->dma_cpu_addr;
+            break;
+
         default:
             return -EINVAL;
     }
@@ -97,23 +134,46 @@ static ssize_t edu_read(struct file *file, char __user *buf, size_t len, loff_t 
 //写操作
 static ssize_t edu_write(struct file *file, const char __user *buf, size_t len, loff_t *off){
     struct edu_device *edu = file->private_data;
-    u32 user_val;
-    unsigned long copy_status;
-    //1. 检查传过来的数据长度
-    if (len < sizeof(u32)) return -EINVAL;
-    //2. 数据从用户区搬到内核区
-    copy_status = copy_from_user(&user_val, buf, sizeof(u32));
-    printk(KERN_INFO "[EDU] User wrote: %u. Writing to Factorial Reg...\n", user_val);
-    //出错则是用户区地址出错
-    if (copy_status) return -EFAULT;
-    //3. 检查硬件是否存在，不存在返回硬件io错误
-    if (!edu) return -EIO;
-    //4. 中断使能
-    iowrite32(STATUS_IRQ_EN, edu->mmio_base+EDU_REG_STATUS);
-    //5. 重置计算标记位
-    edu->fact_ready = 0;
-    //6. 写入硬件
-    iowrite32(user_val, edu->mmio_base + EDU_REG_FACTORIAL);
+    u32 user_val;//存在内核栈的临时变量
+
+    if (len < sizeof(u32)) return -EINVAL;// 检查传过来的数据长度
+    if (!edu->mmio_base) return -EIO;// 检查硬件是否存在，不存在返回硬件io错误
+
+    switch (*off) {
+        //---阶乘运算---
+        case EDU_REG_FACTORIAL:
+            // 拷贝到内核栈
+            if (copy_from_user(&user_val, buf, sizeof(u32))) return -EFAULT;
+            // 中断使能
+            iowrite32(STATUS_IRQ_EN, edu->mmio_base+EDU_REG_STATUS);
+            // 重置计算标记位
+            edu->fact_ready = 0;
+            // 写入硬件
+            iowrite32(user_val, edu->mmio_base + EDU_REG_FACTORIAL);
+            break;
+
+        //---dma---
+        case 0x2000:
+            // 拷贝到内核的一致性缓存区
+            if (!edu->dma_cpu_addr) return -ENOMEM;
+            if (copy_from_user(edu->dma_cpu_addr, buf, sizeof(u32))) return -EFAULT;
+
+            //配置DMA相关寄存器
+            writeq((u64)edu->dma_bus_addr, edu->mmio_base + EDU_REG_DMA_SRC);
+            writeq((u64)EDU_SRAM, edu->mmio_base + EDU_REG_DMA_DST);
+            writeq((u64)sizeof(u32), edu->mmio_base + EDU_REG_DMA_CNT);
+            writeq((u64)DMA_CMD_START, edu->mmio_base + EDU_REG_DMA_CMD);
+
+            //等待DMA传输完毕，轮询方式
+            while (readq(edu->mmio_base + EDU_REG_DMA_CMD) & 1) {
+                cpu_relax(); // 防止 CPU 死锁
+            }        
+
+            break;
+
+        default:
+            return -EINVAL;
+    }
     //7. 返回写的长度
     return sizeof(u32);
 
@@ -148,6 +208,9 @@ static int edu_probe(struct pci_dev *pdev, const struct pci_device_id *id){
     ret = pci_enable_device(pdev);
     if (ret) goto err_free;
 
+    // 开启总线主控模式
+    pci_set_master(pdev);
+
     //2. 申请BAR资源
     ret = pci_request_regions(pdev, DRIVER_NAME);
     if (ret) goto err_disable;
@@ -160,13 +223,26 @@ static int edu_probe(struct pci_dev *pdev, const struct pci_device_id *id){
         goto err_regions;
     }
 
+    //DMA内存分配
+    //设置DMA寻址掩码，只能访问32位地址空间
+    ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(28));
+    if (ret) goto err_iounmap;
+    //申请一致性缓存区，GFP_KERNEL get free page: 内存不够可以休眠
+    edu->dma_cpu_addr = dma_alloc_coherent(&pdev->dev, EDU_DMA_SIZE, &edu->dma_bus_addr, GFP_KERNEL);
+    if (!edu->dma_cpu_addr){
+        ret = -ENOMEM;
+        goto err_iounmap;
+    }
+    memset(edu->dma_cpu_addr, 0, EDU_DMA_SIZE); // 清零
+    *(u32 *)edu->dma_cpu_addr = 0x12345678;     // 写入 Magic Number
+
     //3. 中断相关
     //a. 初始化等待队列
     init_waitqueue_head(&edu->wait_q);
     edu->fact_ready = 0;
     //b. 注册中断
     ret = request_irq(pdev->irq, edu_isr, IRQF_SHARED, DRIVER_NAME, edu);
-    if (ret) goto err_iounmap;
+    if (ret) goto err_dma;
 
     
     //4. 初始化注册字符设备
@@ -200,11 +276,14 @@ err_cdev:
     cdev_del(&edu->cdev);
 err_irq:
     free_irq(pdev->irq, edu);
+err_dma:
+    dma_free_coherent(&pdev->dev, EDU_DMA_SIZE, edu->dma_cpu_addr, edu->dma_bus_addr);
 err_iounmap:
     pci_iounmap(pdev, edu->mmio_base);
 err_regions:
     pci_release_regions(pdev);
 err_disable:
+    pci_clear_master(pdev);
     pci_disable_device(pdev);
 err_free:
     kfree(edu); // 【关键】释放内存
@@ -223,10 +302,14 @@ static void edu_remove(struct pci_dev *pdev){
         cdev_del(&edu->cdev);
         //取消中断
         free_irq(pdev->irq, edu);
+        //取消dma
+        dma_free_coherent(&pdev->dev, EDU_DMA_SIZE, edu->dma_cpu_addr, edu->dma_bus_addr);
         //取消虚拟地址映射
         pci_iounmap(pdev, edu->mmio_base);
         //取消BAR资源
         pci_release_regions(pdev);
+        //关闭总线主控
+        pci_clear_master(pdev);
         //关闭设备
         pci_disable_device(pdev);
         //释放内存
