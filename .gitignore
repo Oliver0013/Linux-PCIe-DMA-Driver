@@ -16,6 +16,8 @@ buildroot/
 *.symvers
 .*.cmd
 .tmp_versions/
+# 忽略离线 depmod 生成的模块索引表 (Uevent/冷插拔依赖)
+bsp/board/qemu_x86_64/rootfs_overlay/lib/modules/*/modules.*
 
 # ==========================
 # 3. 用户态程序二进制
