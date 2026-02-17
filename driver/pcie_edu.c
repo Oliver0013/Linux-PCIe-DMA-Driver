@@ -54,6 +54,52 @@ static irqreturn_t edu_isr(int irq, void *dev){
     return ret;
 }
 
+//-----------辅助函数：硬件DMA环回自检-------
+static int edu_dma_loopback_test(struct edu_device *edu) {
+    //测试数据
+    u32 test_magic = 0xDEADBEEF;
+    //数组指针，每个元素u32
+    u32 *dma_buf = (u32 *)edu->dma_cpu_addr;
+
+    //准备阶段，dma缓存区划分
+    dma_buf[0] = test_magic; //发送区
+    dma_buf[1] = 0x0; //接收区
+
+    // ---第1阶段：主存->硬件SRAM---
+
+    //配置DMA相关寄存器
+    writeq((u64)edu->dma_bus_addr, edu->mmio_base + EDU_REG_DMA_SRC); //源：总线地址
+    writeq((u64)EDU_SRAM, edu->mmio_base + EDU_REG_DMA_DST);          //目的：SRAM偏移地址
+    writeq((u64)sizeof(u32), edu->mmio_base + EDU_REG_DMA_CNT);       //长度：4字节
+    edu->dma_ready = 0; //条件标志，dma没有传输完
+    writeq((u64)(DMA_CMD_START | DMA_CMD_IRQ_EN), edu->mmio_base + EDU_REG_DMA_CMD); //使能/方向/中断
+    //挂起等待中断
+    if (wait_event_interruptible(edu->wait_q, edu->dma_ready == 1)){
+        return -ERESTARTSYS;
+    }
+
+    // ---第2阶段：硬件SRAM->主存---
+    //配置DMA相关寄存器
+    writeq((u64)EDU_SRAM, edu->mmio_base + EDU_REG_DMA_SRC); //源：SRAM偏移地址
+    writeq((u64)(edu->dma_bus_addr + 4), edu->mmio_base + EDU_REG_DMA_DST);          //目的：总线地址
+    writeq((u64)sizeof(u32), edu->mmio_base + EDU_REG_DMA_CNT);       //长度：4字节
+    edu->dma_ready = 0; //条件标志，dma没有传输完
+    writeq((u64)(DMA_CMD_START | DMA_CMD_IRQ_EN | DMA_CMD_DEV_RAM), edu->mmio_base + EDU_REG_DMA_CMD); //使能/方向/中断
+    //挂起等待中断
+    if (wait_event_interruptible(edu->wait_q, edu->dma_ready == 1)){
+        return -ERESTARTSYS;
+    }
+    
+    // --- 第3阶段：数据校验 ---
+    // 注：由于一致性DMA将相关主存区域标志为禁止缓存，所以无需缓存同步
+    if (dma_buf[1] == test_magic) {
+        printk(KERN_INFO "[EDU] DMA Loopback Test Passed! Magic: 0x%x\n", dma_buf[1]);
+        return 0; // 成功
+    } else {
+        printk(KERN_ERR "[EDU] DMA Loopback Failed! Expected 0x%x, got 0x%x\n", test_magic, dma_buf[1]);
+        return -EIO; // 硬件 I/O 错误
+    }            
+}
 
 
 //-----------文件操作函数----------
@@ -78,18 +124,6 @@ static ssize_t edu_read(struct file *file, char __user *buf, size_t len, loff_t 
     }
     //根据偏移量分发任务
     switch(*off) {
-        case EDU_REG_ID: //读取ID（非阻塞）
-            val = ioread32(edu->mmio_base + EDU_REG_ID);
-            break;
-        case EDU_REG_FACTORIAL: //读取阶乘结果（阻塞）
-            if (wait_event_interruptible(edu->wait_q, edu->fact_ready == 1)){
-                return -ERESTARTSYS;
-            }
-            //重置计算标志位
-            edu->fact_ready = 0;
-            //读计算完的阶乘
-            val = ioread32(edu->mmio_base + EDU_REG_FACTORIAL);
-            break;
         // 用于验证 CPU 能否直接访问这块内存
         case 0x1000:
             if (edu->dma_cpu_addr) {
@@ -151,24 +185,11 @@ static ssize_t edu_read(struct file *file, char __user *buf, size_t len, loff_t 
 //写操作
 static ssize_t edu_write(struct file *file, const char __user *buf, size_t len, loff_t *off){
     struct edu_device *edu = file->private_data;
-    u32 user_val;//存在内核栈的临时变量
 
     if (len < sizeof(u32)) return -EINVAL;// 检查传过来的数据长度
     if (!edu->mmio_base) return -EIO;// 检查硬件是否存在，不存在返回硬件io错误
 
     switch (*off) {
-        //---阶乘运算---
-        case EDU_REG_FACTORIAL:
-            // 拷贝到内核栈
-            if (copy_from_user(&user_val, buf, sizeof(u32))) return -EFAULT;
-            // 中断使能
-            iowrite32(STATUS_IRQ_EN, edu->mmio_base+EDU_REG_STATUS);
-            // 重置计算标记位
-            edu->fact_ready = 0;
-            // 写入硬件
-            iowrite32(user_val, edu->mmio_base + EDU_REG_FACTORIAL);
-            break;
-
         //---dma---
         case 0x2000:
             // 拷贝到内核的一致性缓存区
@@ -209,17 +230,20 @@ static long edu_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
 
     //根据命令分发任务
     switch (cmd){
-        //---获取硬件ID---
+        //--- 获取硬件ID ---
         case EDU_IOC_GET_ID:
+        {
             u32 id_val = ioread32(edu->mmio_base + EDU_REG_ID);
             // 将读取的 ID 拷贝到用户态 arg 指向的内存
             if (copy_to_user((u32 __user *)arg, &id_val, sizeof(id_val))) {
                 return -EFAULT;
             }
             break;
+        }
 
-        // --- 命令 2：计算阶乘 ---
-        case EDU_IOC_CALC_FACT: 
+        // --- 计算阶乘 ---
+        case EDU_IOC_CALC_FACT:
+        { 
             struct edu_fact_req req;
             
             // 1. 把用户态的结构体拷贝到内核里来
@@ -247,6 +271,11 @@ static long edu_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
                 return -EFAULT;
             }
             break; 
+        }
+        
+        //--- 硬件一致性环回检测 ---
+        case EDU_IOC_DMA_LOOPBACK:
+            return edu_dma_loopback_test(edu);
 
         default:
             // 收到不认识的命令，返回标准错误码 ENOTTY
@@ -323,7 +352,15 @@ static int edu_probe(struct pci_dev *pdev, const struct pci_device_id *id){
     ret = request_irq(pdev->irq, edu_isr, IRQF_SHARED, DRIVER_NAME, edu);
     if (ret) goto err_dma;
 
-    
+    //-----硬件DMA环回自测-----
+    printk(KERN_INFO "[EDU] Running Power-On Self-Test (POST)...\n");
+    ret = edu_dma_loopback_test(edu);
+    if (ret) {
+        printk(KERN_ERR "[EDU] FATAL: DMA Loopback failed! Hardware is faulty. Aborting load.\n");
+        goto err_irq; // 【拦截！】体检不合格，直接跳到错误处理释放中断，拒绝加载！
+    }
+    printk(KERN_INFO "[EDU] POST passed. DMA Engine is fully healthy.\n");    
+
     //4. 初始化注册字符设备
     //初始化cdev结构，与fops关联
     edu->cdev.owner = THIS_MODULE;

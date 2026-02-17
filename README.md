@@ -158,23 +158,74 @@ Linux-PCIe-DMA-Driver/
   * 宏隔离: 重构 `pcie_edu.h`，引入 `#ifdef __KERNEL__` 预处理指令，将 `struct edu_device` 等内核私有结构与用户态可见的 `ioctl` 宏完全隔离，规范化对外接口。
   * 跨界类型修复: 将共享结构体中的数据类型统一替换为内核标准暴露类型 `__u32`，彻底解决目标机应用层 (`uint32_t`) 与内核侧 (`u32`) 包含不同标准库导致的编译冲突问题
 
+### P7: 一致性 DMA 策略与硬件环回测试机制
+
+* [x] **2026-02-17**: 完善模块依赖与动态节点管理。
+  + 依赖构建: 优化 Makefile 部署逻辑，利用宿主机 `depmod` 工具在根文件系统离线生成 `modules.alias` 与 `modules.dep`，避免目标板开机扫描带来的启动延迟。
+  + 节点生成: 依托内核 `devtmpfs` 与 `mdev` 机制，通过挂载系统 `Uevent` 热插拔事件，实现驱动加载后 `/dev/edu_driver` 设备节点的自动注册与动态生成。
+
+* [x] **2026-02-17**: 明确 DMA 内存管理策略 (控制流分离)。
+  + 机制选型: 针对高频、小数据量的状态交互与自检场景，保留并优化一致性 DMA (`dma_alloc_coherent`) 方案，避免了频繁调用流式 DMA 带来的 IOMMU 页表修改与 Cache 同步 (Cache Coherency) 刷写开销。
+  + ioctl 重构: 针对无载荷控制流，使用标准的无数据交互宏 `_IO('E', 3)` 定义 `EDU_IOC_DMA_LOOPBACK` 命令，将测试逻辑完全收敛于内核态，简化了用户态系统调用的参数传递。
+
+* [x] **2026-02-17**: 实现硬件 DMA 环回测试 (Loopback Test) 与 Probe 状态校验。
+  + 环回测试闭环: 提取 `edu_dma_loopback_test` 辅助函数。利用一致性内存作为反弹缓冲区 (Bounce Buffer)，由 CPU 写入 Magic Number (`0xDEADBEEF`)，触发硬件 DMA 引擎将数据搬入 SRAM 并原路回写。通过 CPU 最终比对，全链路验证 PCIe 设备的 Bus Master (总线主控) 能力与 DMA 通道状态。
+  + 设备上线前校验: 将 DMA 环回测试集成至 `edu_probe` 阶段（位于 IRQ 注册之后，cdev 暴露之前）。作为设备初始化的一部分，若校验失败则立即返回错误码 `-EIO` 并执行异常处理 (goto) 级联释放资源，避免 DMA 引擎异常的设备暴露给应用层，提升驱动健壮性。
+
 ---
 
 ## 🚀 快速开始 (Quick Start)
 
-### 1. 环境依赖
+本项目采用**树外编译 (Out-of-Tree)** 架构，环境分为两部分：基础系统 (BSP) 与驱动程序 (Driver)。请按以下步骤依次构建。
+
+### 1. 安装环境依赖
+
+首先，在你的宿主机（推荐 Ubuntu 20.04/22.04）上安装必备的交叉编译与虚拟化工具链：
 
 ```bash
-sudo apt-get install build-essential qemu-system-x86 git libncurses-dev
-
+sudo apt-get update
+sudo apt-get install -y build-essential qemu-system-x86 git libncurses-dev wget cpio
 ```
 
-### 2. 启动 QEMU
+### 2. 克隆仓库
+```bash
+git clone git@github.com:Oliver0013/Linux-PCIe-DMA-Driver.git
+cd Linux-PCIe-DMA-Driver
+```
+
+### 3. 构建基础系统 (BSP) 与内核
+由于 Buildroot 体积较大，本项目未将其包含在版本库中。我们通过预设的 defconfig 实现一键自动化部署：
 
 ```bash
-# 编译完 BSP 后
-./scripts/run_qemu.sh
+# 下载指定版本的 Buildroot (2024.02.9 LTS)
+wget [https://buildroot.org/downloads/buildroot-2024.02.9.tar.gz](https://buildroot.org/downloads/buildroot-2024.02.9.tar.gz)
+tar -zxvf buildroot-2024.02.9.tar.gz
 
+# 重命名目录以匹配 Makefile 路径
+mv buildroot-2024.02.9 buildroot
+cd buildroot
+
+# 载入本项目专属的极限裁剪配置 (内核压缩至 4.4MB)
+make defconfig BR2_DEFCONFIG=../bsp/configs/my_qemu_defconfig
+
+# 启动全量编译
+# ⚠️ 注意：GCC 编译时极其消耗内存。如果虚拟机内存 <= 4GB，请使用 make -j2 防止触发 OOM (Out Of Memory) 杀手！内存充足可使用 make -j$(nproc)。
+make -j2
+cd ..
+```
+
+### 4. 编译 PCIe 驱动与测试程序
+依托于完善的顶层 Makefile，BSP 编译完成后，只需在项目根目录执行一条命令，即可自动完成驱动与测试程序的编译，并通过 Overlay 机制打包进根文件系统：
+
+```bash
+# 在项目根目录执行
+make all
+```
+
+### 5. 启动 QEMU 仿真与上板测试
+```bash
+# 启动带有 EDU 硬件参数的 QEMU 环境
+make run
 ```
 
 ---

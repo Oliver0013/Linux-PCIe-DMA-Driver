@@ -49,6 +49,8 @@ deploy:
 	@echo ">>> [2/3] Deploying to Overlay..."
 	cp -f $(DRIVER_DIR)/pcie_edu.ko $(OVERLAY_DIR)/lib/modules/6.1.44/extra/
 	cp -f $(USER_APP_DIR)/test_rw $(OVERLAY_DIR)/root/
+	@echo ">>> [Index] Generating offline module aliases..."
+	$(BR_DIR)/output/host/sbin/depmod -a -b $(OVERLAY_DIR) 6.1.44
 
 
 # 步骤 4: 重建文件系统镜像

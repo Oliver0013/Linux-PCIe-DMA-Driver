@@ -34,47 +34,17 @@ int main() {
     }
 
     // ==========================================
-    // --- [P5 新增] 测试 4: 验证 DMA 缓冲区 ---
+    // --- [工业级架构] 测试 4: 硬件一致性 DMA 环回自检 ---
     // ==========================================
-    printf("[TEST 4] Checking DMA Buffer via backdoor Offset 0x1000...\n");
-    if (pread(fd, &val, 4, 0x1000) == 4) {
-        printf("[TEST 4] Read DMA Buffer (Offset 0x1000): 0x%08x\n", val);
-        if (val == 0x12345678) {
-            printf("         -> SUCCESS! CPU can see the DMA memory.\n");
-        } else {
-            printf("         -> FAIL! Value does not match magic number.\n");
-        }
-    } else {
-        perror("Read DMA Buffer failed");
-    }
-
-    // ==========================================
-    // --- [P5 新增] 测试 5: 触发 DMA 并验证 SRAM ---
-    // ==========================================
-    uint32_t dma_payload = 0x8899AABB;
-    printf("\n[TEST 5] Initiating DMA Transfer with payload: 0x%08x\n", dma_payload);
+    printf("\n[TEST 4] Initiating Coherent DMA Hardware Loopback Diagnostic...\n");
     
-    // 往 0x2000 写数据，触发驱动里的 DMA 发车逻辑
-    if (pwrite(fd, &dma_payload, 4, 0x2000) == 4) {
-        printf("         -> DMA Command sent to driver.\n");
+    // 核心精髓：因为我们在头文件定义的是 _IO('E', 3)，这代表无数据载荷交互
+    // 所以 ioctl 的第三个参数直接传 0 即可。内核会自动生成魔数并指挥硬件跑圈！
+    if (ioctl(fd, EDU_IOC_DMA_LOOPBACK, 0) == 0) {
+        printf("         -> 🎉 BINGO! DMA Loopback Test Passed!\n");
+        printf("         -> (Bus Mastering & DMA Engine are fully operational!)\n");
     } else {
-        perror("DMA trigger failed");
-    }
-
-    // 稍微等一下硬件搬运（QEMU 模拟器环境下其实是瞬时完成的）
-    usleep(10000); 
-
-    // 验证：去设备内部 SRAM (0x40000) 查岗，看看货到了没
-    uint32_t sram_val;
-    if (pread(fd, &sram_val, 4, 0x40000) == 4) {
-        printf("[TEST 6] Read from EDU SRAM (Offset 0x40000): 0x%08x\n", sram_val);
-        if (sram_val == dma_payload) {
-            printf("         -> 🎉 BINGO! DMA hardware successfully moved the data!\n");
-        } else {
-            printf("         -> ❌ FAIL! Data mismatch.\n");
-        }
-    } else {
-        perror("Read SRAM failed");
+        perror("         -> ❌ FAIL! DMA Loopback Test failed");
     }
 
     close(fd);

@@ -15,7 +15,7 @@ struct edu_fact_req {
 #define EDU_MAGIC 'E'
 #define EDU_IOC_GET_ID    _IOR(EDU_MAGIC, 1, __u32)
 #define EDU_IOC_CALC_FACT _IOWR(EDU_MAGIC, 2, struct edu_fact_req)
-
+#define EDU_IOC_DMA_LOOPBACK  _IO('E', 3)
 
 // ========================================================
 // 🌟 硬件规格与寄存器定义
@@ -81,7 +81,7 @@ struct edu_device {
     // 中断与异步通知
     wait_queue_head_t wait_q;      // 进程睡眠的“宿舍”
     int fact_ready;                // 条件标记：1 表示阶乘算完了
-    int dma_ready;                 // 【补充】条件标记：1 表示DMA传完了 (驱动C代码里用到了)
+    int dma_ready;                 // 条件标记：1 表示DMA传完了 (驱动C代码里用到了)
     atomic_t status;               // 设备状态（可选）
 
     //DMA相关
