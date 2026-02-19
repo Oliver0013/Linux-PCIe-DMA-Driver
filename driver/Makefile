@@ -6,6 +6,9 @@ KERNEL_DIR ?= /lib/modules/$(shell uname -r)/build
 CROSS_COMPILE ?= 
 
 obj-m := pcie_edu.o
+
+pcie_edu-y := edu_main.o edu_cdev.o edu_hw.o
+
 PWD := $(shell pwd)
 
 all:

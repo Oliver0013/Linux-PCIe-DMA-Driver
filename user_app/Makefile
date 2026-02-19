@@ -9,20 +9,20 @@ CROSS_COMPILE ?=
 CC := $(CROSS_COMPILE)gcc
 
 # 2. 通用配置
-CFLAGS ?= -Wall -O2
+# -pthread 既是编译选项也是链接选项，比单纯加 -lpthread 更规范
+CFLAGS ?= -Wall -O2 -pthread
 
 # 3. 目标定义
-TARGET := test_rw
-SRCS := test_rw.c
+TARGETS := test_rw stress_test
 
 .PHONY: all clean
 
-all: $(TARGET)
+all: $(TARGETS)
 
-$(TARGET): $(SRCS)
-	@echo "   [APP] Building with $(CC)..."
-	$(CC) $(CFLAGS) -o $@ $^
+%: %.c
+	@echo "   [APP] Building $@ with $(CC)..."
+	$(CC) $(CFLAGS) -o $@ $<
 
 clean:
 	@echo "   [APP] Cleaning..."
-	rm -f $(TARGET)
+	rm -f $(TARGETS)

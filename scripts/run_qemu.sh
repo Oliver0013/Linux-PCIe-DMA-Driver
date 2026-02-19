@@ -19,4 +19,5 @@ qemu-system-x86_64 \
     -drive file="$ROOTFS_IMG",format=raw,if=virtio \
     -append "root=/dev/vda console=ttyS0" \
     -nographic \
+    -device edu \
     -device edu

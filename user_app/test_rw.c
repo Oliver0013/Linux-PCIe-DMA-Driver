@@ -4,12 +4,11 @@
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <stdint.h>
-#include "../driver/pcie_edu.h"
-#define DEVICE_PATH "/dev/edu_driver"
+#include "../driver/uapi_edu.h"
+#define DEVICE_PATH "/dev/edu_driver0"
 
 int main() {
     int fd;
-    uint32_t val;
 
     fd = open(DEVICE_PATH, O_RDWR);
     if (fd < 0) { perror("Open"); return -1; }

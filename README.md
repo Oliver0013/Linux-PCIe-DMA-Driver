@@ -35,11 +35,14 @@ Linux-PCIe-DMA-Driver/
 │           └── post-build.sh     # (可选) 构建后钩子
 │
 ├── driver/                 # [内核态] 驱动源码
-│   ├── pcie_edu.c
-│   ├── pcie_edu.h
-│   └── Makefile            # 驱动编译脚本
+|   ├── Makefile
+|   ├── edu_main.c     # [总线层] 模块初始化与 PCI 子系统对接
+|   ├── edu_cdev.c     # [用户层] 字符设备 VFS 接口 (fops)
+|   ├── edu_hw.c       # [硬件层] 硬件控制、中断、DMA 操作
+|   ├── pcie_edu.h     # [内核侧头文件] 私有结构体与跨文件函数声明
+|   └── uapi_edu.h     # [用户侧头文件] ioctl 宏与共享结构
 │
-├── user_app/               # [用户态] 测试程序 (P4 阶段重点)
+├── user_app/               # [用户态] 测试程序
 │   ├── test_rw.c           # C 语言读写测试
 │   └── benchmark.py        # Python 性能测试
 │
@@ -171,6 +174,37 @@ Linux-PCIe-DMA-Driver/
 * [x] **2026-02-17**: 实现硬件 DMA 环回测试 (Loopback Test) 与 Probe 状态校验。
   + 环回测试闭环: 提取 `edu_dma_loopback_test` 辅助函数。利用一致性内存作为反弹缓冲区 (Bounce Buffer)，由 CPU 写入 Magic Number (`0xDEADBEEF`)，触发硬件 DMA 引擎将数据搬入 SRAM 并原路回写。通过 CPU 最终比对，全链路验证 PCIe 设备的 Bus Master (总线主控) 能力与 DMA 通道状态。
   + 设备上线前校验: 将 DMA 环回测试集成至 `edu_probe` 阶段（位于 IRQ 注册之后，cdev 暴露之前）。作为设备初始化的一部分，若校验失败则立即返回错误码 `-EIO` 并执行异常处理 (goto) 级联释放资源，避免 DMA 引擎异常的设备暴露给应用层，提升驱动健壮性。
+
+### P8: 驱动模块化拆分与代码重构
+* [x] **2026-02-18**: UAPI 头文件与内核私有结构隔离。
+  + 物理拆分头文件：移除 #ifdef __KERNEL__ 宏，将用户态系统调用契约（ioctl 宏、共享结构体）剥离至独立的 uapi_edu.h。
+  + 内核结构收敛：硬件物理偏移量及内核私有 struct edu_device 统一封装于 pcie_edu.h，实现严格的跨空间视图隔离。
+
+* [x] **2026-02-18**: 核心逻辑解耦与多文件架构剥离。
+  + 按子系统职责将单文件切分为三层：edu_main.c (PCI总线探测与生命周期)、edu_cdev.c (VFS文件操作)、edu_hw.c (底层硬件I/O与中断)。
+  + 修正跨文件编译边界：在公共头文件中引入 extern 声明，调整 edu_fops 与 edu_isr 等核心符号的可见性。
+
+* [x] **2026-02-18**: Kbuild 构建系统多文件链接适配。
+  + 更改驱动 Makefile，引入 pcie_edu-y 多目标链接规则，实现多个独立编译单元 (.o) 至单一内核模块 (.ko) 的构建对接，并经上板测试确认逻辑无退化。
+
+### P9: 并发控制与多实例架构
+
+* [x] **2026-02-19**: 互斥锁与临界区保护。
+  + 机制：在 `struct edu_device` 中引入 `mutex`，严格保护硬件寄存器读写与状态机流转的临界区。
+  + 成果：解决多进程并发 `ioctl` 导致的硬件竞态，并完善了 `-ERESTARTSYS` 信号中断的异常解锁逻辑。
+
+* [x] **2026-02-19**: 上下文同步与原子变量。
+  + 机制：引入 `atomic_t` 替换原有的普通整型标志位 (`fact_ready`, `dma_ready`)。
+  + 成果：依托底层硬件原子指令，实现进程上下文与中断上下文之间的无锁同步，杜绝 ISR 误用锁休眠导致的内核 Panic。
+
+* [x] **2026-02-19**: IDA 机制与多实例重构。
+  + 机制：引入内核 IDA动态分配/回收次设备号。
+  + 架构修正：修复 LDM 生命周期错位，将 `class_create` 提升至模块级 `dev_init` 全局挂载，保留 `device_create` 在 `probe` 阶段执行。
+  + 成果：彻底打通多物理 PCIe 设备同载，成功实现 `/dev/edu_driver0` 与 `/dev/edu_driver1` 独立内存上下文隔离。
+
+* [x] **2026-02-19**: 多线程混沌压测与构建优化。
+  + 构建：重构 `user_app/Makefile`，引入自动化模式规则 (`% : %.c`) 与 `-pthread` 链接支持。
+  + 验证：编写多线程压测工具，利用 `sched_yield()` 主动诱发 CPU 调度抢占。在双卡环境下经受百万级并发请求测试，零数据损坏，验证并发控制策略有效。
 
 ---
 
