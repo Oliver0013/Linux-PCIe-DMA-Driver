@@ -43,12 +43,12 @@ Linux-PCIe-DMA-Driver/
 |   └── uapi_edu.h     # [用户侧头文件] ioctl 宏与共享结构
 │
 ├── user_app/               # [用户态] 测试程序
-│   ├── test_rw.c           # C 语言读写测试
+│   ├── test_rw.c           # 基本功能测试
+|   ├── stress_test.c       # 并发压力测试
 │   └── benchmark.py        # Python 性能测试
 │
 ├── scripts/                # [工具] 辅助脚本
-│   ├── run_qemu.sh         # QEMU 启动命令封装
-│   └── load_driver.sh      # (可选) 手动调试用，自动加载已由 S40 完成
+│   └── run_qemu.sh         # QEMU 启动命令封装
 │
 └── docs/                   # [文档]
     ├── edu_datasheet.txt
