@@ -206,6 +206,31 @@ Linux-PCIe-DMA-Driver/
   + 构建：重构 `user_app/Makefile`，引入自动化模式规则 (`% : %.c`) 与 `-pthread` 链接支持。
   + 验证：编写多线程压测工具，利用 `sched_yield()` 主动诱发 CPU 调度抢占。在双卡环境下经受百万级并发请求测试，零数据损坏，验证并发控制策略有效。
 
+### P10: 现代中断架构升级与 BSP 配置固化
+
+* [x] **2026-02-20**: MSI/MSI-X 现代中断架构迁移。
+  + 机制：弃用 Legacy INTx 共享中断 (`pdev->irq` & `IRQF_SHARED`)，全面引入 `pci_alloc_irq_vectors` API。
+  + 兼容性：传入 `PCI_IRQ_ALL_TYPES` 标志位，实现硬件能力的自动降级匹配 (MSI-X -> MSI -> INTx)，保障驱动高可用性。
+  + 验证：查阅 `/proc/interrupts`，确认中断路由成功从 `IO-APIC` 切换至设备独占的 `PCI-MSI`。
+
+* [x] **2026-02-20**: 内核能力重构与 BSP 规范化固化。
+  + 内核支持：通过 `menuconfig` 重新开启 `CONFIG_PCI_MSI` 选项，修复极限裁剪导致的中断分配失败 (`-ENOSPC`)。
+  + 资产固化：遵循工业级 BSP 维护规范，执行 `make linux-savedefconfig`，将内核配置提取至 `bsp/board/qemu_x86_64/linux_defconfig`。
+  + 构建闭环：更新 Buildroot 寻址规则，并导出顶级配置至 `bsp/configs/my_qemu_defconfig`，确保跨机器环境的一键级 100% 复现。
+
+### P11: 流式 DMA 引入与 I/O 架构重构
+* [x] **2026-02-20**: 双轨制 DMA 架构与死锁规避。
+  + 数据通路重构: 引入流式 DMA (dma_map_single/unmap_single) 处理 read/write 大块载荷，利用 CPU Cache 提升吞吐量；保留一致性 DMA (dma_alloc_coherent) 专职控制流与硬件自测，实现控制平面与数据平面分离。
+  + I/O 超时容错: 将底层同步机制全面替换为 wait_event_interruptible_timeout，防止因硬件状态机异常或中断丢失导致内核线程永久阻塞 (Deadlock)。
+
+* [x] **2026-02-20**: VFS 语义对齐与硬件 Quirk 规避。
+  + 随机寻址契约: 显式挂载 .llseek = default_llseek 解除内核对字符设备的默认寻址拦截 (-ESPIPE)，并将文件游标 (loff_t) 严格映射为 SRAM 物理相对偏移，实现任意位置的随机存取 (Random Access)。
+  + 边界截断保护 (Quirk): 针对 QEMU EDU DMA 引擎的 Off-by-one 硬件缺陷（addr + size > 0x40fff 触发 abort），在驱动层将可用容量钳制为 4095 Bytes，并在 VFS 读写接口实现严格的越界截断逻辑 (Boundary Truncation)。
+
+* [x] **2026-02-20**: 测试套件重构。
+  + 用例解耦: 将用户态测试验证拆分为 test_ioctl (控制平面验证) 与 test_dma_stream (数据平面验证)。
+  + 完整性校验: 补充流式 DMA 满载收发的数据一致性比对、lseek 随机定位校验以及 VFS 边界截断触发测试，严格处理并断言系统调用返回值。
+
 ---
 
 ## 🚀 快速开始 (Quick Start)

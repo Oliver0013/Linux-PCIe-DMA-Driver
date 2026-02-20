@@ -49,6 +49,10 @@
 
 // 定义 DMA 缓冲区大小 (4KB = 1页)
 #define EDU_DMA_SIZE        0x1000
+// 修改为带硬件 Quirk 补丁的定义：
+// [Hardware Quirk] QEMU EDU DMA engine has an off-by-one bug checking bounds. 
+// It panics if addr + size > 0x40fff. We must clamp the usable SRAM to 4095 bytes.
+#define EDU_SRAM_SIZE 0x0FFF
 
 // --- 驱动配置 ---
 #define DRIVER_NAME "edu_driver"

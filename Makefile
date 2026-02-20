@@ -48,7 +48,7 @@ user_app:
 deploy:
 	@echo ">>> [2/3] Deploying to Overlay..."
 	cp -f $(DRIVER_DIR)/pcie_edu.ko $(OVERLAY_DIR)/lib/modules/6.1.44/extra/
-	cp -f $(USER_APP_DIR)/test_rw $(USER_APP_DIR)/stress_test $(OVERLAY_DIR)/root/
+	cp -f $(USER_APP_DIR)/test_ioctl $(USER_APP_DIR)/test_dma_stream $(USER_APP_DIR)/stress_test $(OVERLAY_DIR)/root/
 	@echo ">>> [Index] Generating offline module aliases..."
 	$(BR_DIR)/output/host/sbin/depmod -a -b $(OVERLAY_DIR) 6.1.44
 
@@ -76,4 +76,4 @@ clean:
 	$(MAKE) -C $(DRIVER_DIR) clean
 	$(MAKE) -C $(USER_APP_DIR) clean
 	rm -f $(OVERLAY_DIR)/lib/modules/6.1.44/extra/pcie_edu.ko 
-	rm -f $(OVERLAY_DIR)/root/test_rw $(OVERLAY_DIR)/root/stress_test
+	rm -f $(OVERLAY_DIR)/root/test_ioctl $(OVERLAY_DIR)/root/test_dma_stream $(OVERLAY_DIR)/root/stress_test

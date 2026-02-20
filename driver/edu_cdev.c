@@ -22,92 +22,134 @@ static int edu_open(struct inode *inode, struct file *file) {
 // ----------- 2. 文件读操作 ----------
 static ssize_t edu_read(struct file *file, char __user *buf, size_t len, loff_t *off) {
     struct edu_device *edu = file->private_data;
-    u32 val;
-    unsigned long copy_status;
-    
-    // 检查硬件还是否存在
-    if (!edu->mmio_base) return -EIO;
+    void *kbuf;
+    dma_addr_t dma_handle;
+    long timeout;
+    ssize_t ret_len = 0;
 
-    // 根据偏移量分发任务
-    switch(*off) {
-        // 用于验证 CPU 能否直接访问这块内存
-        case 0x1000:
-            if (edu->dma_cpu_addr) {
-                val = *(u32 *)edu->dma_cpu_addr;
-                printk(KERN_INFO "[EDU DMA] Read from DMA Buffer: 0x%x\n", val);
-            } else {
-                val = 0xDEAD0000; // 错误码
-            }
-            break;
-            
-        // 验证DMA是否成功把数据写到了SRAM，把它搬回来验证
-        case 0x40000:
-            if (!edu->dma_cpu_addr) return -ENOMEM;
+    // 1. 严格的 VFS 边界检查
+    if (*off >= EDU_SRAM_SIZE) return 0; // 读到 EOF
+    if (*off + len > EDU_SRAM_SIZE) {
+        len = EDU_SRAM_SIZE - *off;
+    }
+    if (len == 0) return 0;
 
-            // 1. 设置 DMA SRC 为设备的 SRAM 地址
-            writeq((u64)EDU_SRAM, edu->mmio_base + EDU_REG_DMA_SRC);
-            // 2. 设置 DMA DST 为主机的 DMA 物理总线地址
-            writeq((u64)edu->dma_bus_addr, edu->mmio_base + EDU_REG_DMA_DST);
-            // 3. 设置搬运大小 (4字节)
-            writeq((u64)sizeof(u32), edu->mmio_base + EDU_REG_DMA_CNT);
-            
-            // 4. 发送开始命令，并改变方向！(从 EDU 到 RAM)
-            writeq((u64)(DMA_CMD_START | DMA_CMD_DEV_RAM | DMA_CMD_IRQ_EN), edu->mmio_base + EDU_REG_DMA_CMD);
+    kbuf = kmalloc(len, GFP_KERNEL);
+    if (!kbuf) return -ENOMEM;
 
-            // 5. 阻塞等待 DMA 把数据搬回主存
-            if (wait_event_interruptible(edu->wait_q, atomic_read(&edu->dma_ready) == 1)){
-                return -ERESTARTSYS;
-            }
-            atomic_set(&edu->dma_ready, 0); // 清除标志位
-
-            // 6. 此时数据已经躺在主机的内存里了，CPU可以直接读
-            val = *(u32 *)edu->dma_cpu_addr;
-            break;
-
-        default:
-            return -EINVAL;
+    // 2. 流式映射 (方向：设备将向主存写入数据)
+    dma_handle = dma_map_single(&edu->pdev->dev, kbuf, len, DMA_FROM_DEVICE);
+    if (dma_mapping_error(&edu->pdev->dev, dma_handle)) {
+        ret_len = -ENOMEM;
+        goto out_free;
     }
 
-    printk(KERN_INFO "[EDU] Read Offset 0x%llx, Value: 0x%x\n", *off, val);
+    // 3. 【加锁】进入 DMA 硬件配置临界区
+    mutex_lock(&edu->hw_lock);
+
+    // 源地址 = 硬件 SRAM 基地址 + 当前的文件读写偏移量
+    writeq((u64)(EDU_SRAM + *off), edu->mmio_base + EDU_REG_DMA_SRC);
+    writeq((u64)dma_handle, edu->mmio_base + EDU_REG_DMA_DST);
+    writeq((u64)len, edu->mmio_base + EDU_REG_DMA_CNT);
     
-    // 数据从内核区搬到用户区
-    copy_status = copy_to_user(buf, &val, sizeof(u32));
-    if (copy_status) return -EFAULT;
-    
-    *off += sizeof(u32);
-    return sizeof(u32);
+    atomic_set(&edu->dma_ready, 0); 
+    // 注意方向标志：DMA_CMD_DEV_RAM
+    writeq((u64)(DMA_CMD_START | DMA_CMD_DEV_RAM | DMA_CMD_IRQ_EN), edu->mmio_base + EDU_REG_DMA_CMD);
+
+    // 4. 【超时保护】挂起等待
+    timeout = wait_event_interruptible_timeout(edu->wait_q, atomic_read(&edu->dma_ready) == 1, msecs_to_jiffies(1000));
+
+    mutex_unlock(&edu->hw_lock);
+
+    // 5. 解除流式映射 (核心：内核在此处 Invalidate CPU Cache)
+    dma_unmap_single(&edu->pdev->dev, dma_handle, len, DMA_FROM_DEVICE);
+
+    // 6. 错误处理与用户态拷贝
+    if (timeout == 0) {
+        printk(KERN_ERR "[EDU] DMA Read Timeout at offset 0x%llx!\n", *off);
+        ret_len = -ETIMEDOUT;
+    } else if (timeout < 0) {
+        ret_len = -ERESTARTSYS;
+    } else {
+        // 只有硬件成功完成搬运，才将数据拷贝给用户
+        if (copy_to_user(buf, kbuf, len)) {
+            ret_len = -EFAULT;
+        } else {
+            *off += len; // 成功读取，推进文件指针
+            ret_len = len;
+        }
+    }
+
+out_free:
+    kfree(kbuf);
+    return ret_len;
 }
 
 // ----------- 3. 文件写操作 ----------
-static ssize_t edu_write(struct file *file, const char __user *buf, size_t len, loff_t *off){
+static ssize_t edu_write(struct file *file, const char __user *buf, size_t len, loff_t *off) {
     struct edu_device *edu = file->private_data;
+    void *kbuf;
+    dma_addr_t dma_handle;
+    long timeout;
+    ssize_t ret_len = 0;
 
-    if (len < sizeof(u32)) return -EINVAL;
-    if (!edu->mmio_base) return -EIO;
-
-    switch (*off) {
-        // --- dma 正向传输 ---
-        case 0x2000:
-            if (!edu->dma_cpu_addr) return -ENOMEM;
-            if (copy_from_user(edu->dma_cpu_addr, buf, sizeof(u32))) return -EFAULT;
-
-            // 配置DMA相关寄存器
-            writeq((u64)edu->dma_bus_addr, edu->mmio_base + EDU_REG_DMA_SRC);
-            writeq((u64)EDU_SRAM, edu->mmio_base + EDU_REG_DMA_DST);
-            writeq((u64)sizeof(u32), edu->mmio_base + EDU_REG_DMA_CNT);
-            writeq((u64)(DMA_CMD_START | DMA_CMD_IRQ_EN), edu->mmio_base + EDU_REG_DMA_CMD);
-
-            // 阻塞等待
-            if (wait_event_interruptible(edu->wait_q, atomic_read(&edu->dma_ready) == 1)){
-                return -ERESTARTSYS;
-            }
-            atomic_set(&edu->dma_ready, 0);                 
-            break;
-
-        default:
-            return -EINVAL;
+    // 1. 严格的 VFS 边界检查
+    if (*off >= EDU_SRAM_SIZE) return -ENOSPC; // 文件指针已到末尾
+    if (*off + len > EDU_SRAM_SIZE) {
+        len = EDU_SRAM_SIZE - *off; // 截断超出的部分，防止 DMA 越界写坏硬件寄存器
     }
-    return sizeof(u32);
+    if (len == 0) return 0;
+
+    // 2. 分配 Cacheable 的普通内核内存作为流式 DMA 跳板
+    kbuf = kmalloc(len, GFP_KERNEL);
+    if (!kbuf) return -ENOMEM;
+
+    if (copy_from_user(kbuf, buf, len)) {
+        ret_len = -EFAULT;
+        goto out_free;
+    }
+
+    // 3. 流式映射 (核心：自动处理 Cache 刷写，将数据同步到主存供 DMA 读取)
+    dma_handle = dma_map_single(&edu->pdev->dev, kbuf, len, DMA_TO_DEVICE);
+    if (dma_mapping_error(&edu->pdev->dev, dma_handle)) {
+        ret_len = -ENOMEM;
+        goto out_free;
+    }
+
+    // 4. 【加锁】进入 DMA 硬件配置临界区
+    mutex_lock(&edu->hw_lock);
+
+    // 目标地址 = 硬件 SRAM 基地址 + 当前的文件读写偏移量
+    writeq((u64)dma_handle, edu->mmio_base + EDU_REG_DMA_SRC);
+    writeq((u64)(EDU_SRAM + *off), edu->mmio_base + EDU_REG_DMA_DST);
+    writeq((u64)len, edu->mmio_base + EDU_REG_DMA_CNT);
+    
+    atomic_set(&edu->dma_ready, 0); 
+    writeq((u64)(DMA_CMD_START | DMA_CMD_IRQ_EN), edu->mmio_base + EDU_REG_DMA_CMD);
+
+    // 5. 【超时保护】挂起等待硬件中断，最多等 1000 毫秒
+    timeout = wait_event_interruptible_timeout(edu->wait_q, atomic_read(&edu->dma_ready) == 1, msecs_to_jiffies(1000));
+
+    // 6. 退出临界区
+    mutex_unlock(&edu->hw_lock);
+
+    // 7. 解除流式映射 (释放总线地址)
+    dma_unmap_single(&edu->pdev->dev, dma_handle, len, DMA_TO_DEVICE);
+
+    // 8. 错误处理与 VFS 语义维护
+    if (timeout == 0) {
+        printk(KERN_ERR "[EDU] DMA Write Timeout at offset 0x%llx!\n", *off);
+        ret_len = -ETIMEDOUT;
+    } else if (timeout < 0) {
+        ret_len = -ERESTARTSYS;
+    } else {
+        *off += len; // 成功写入，推进文件指针
+        ret_len = len;
+    }
+
+out_free:
+    kfree(kbuf);
+    return ret_len;
 }
 
 // ----------- 4. 文件 IOCTL 控制操作 ----------
@@ -126,6 +168,8 @@ static long edu_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
         case EDU_IOC_CALC_FACT:
         { 
             struct edu_fact_req req;
+            long timeout; // 超时变量
+
             if (copy_from_user(&req, (struct edu_fact_req __user *)arg, sizeof(req))) return -EFAULT;
 
             //加锁独占硬件的阶乘计算单元
@@ -135,12 +179,21 @@ static long edu_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
             atomic_set(&edu->fact_ready, 0);
             iowrite32(req.val, edu->mmio_base + EDU_REG_FACTORIAL);
 
-            if (wait_event_interruptible(edu->wait_q, atomic_read(&edu->fact_ready) == 1)) {
-                mutex_unlock(&edu->hw_lock);//异常解锁
-                return -ERESTARTSYS;
+            // 替换为带超时机制的等待，比如给它 500 毫秒
+            timeout = wait_event_interruptible_timeout(edu->wait_q, atomic_read(&edu->fact_ready) == 1, msecs_to_jiffies(500));
+
+            if (timeout == 0) {
+                printk(KERN_ERR "[EDU] HW Fault: Factorial calculation timed out!\n");
+                mutex_unlock(&edu->hw_lock);
+                return -ETIMEDOUT; // 返回标准超时错误码
+            } else if (timeout < 0) {
+                mutex_unlock(&edu->hw_lock);
+                return -ERESTARTSYS; // 被信号打断
             }
+            
             atomic_set(&edu->fact_ready, 0);
 
+            // 只有成功了才能去读结果
             req.result = ioread32(edu->mmio_base + EDU_REG_FACTORIAL);
 
             // 数据读取完毕，正常解锁
@@ -151,12 +204,14 @@ static long edu_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
         }
         
         case EDU_IOC_DMA_LOOPBACK:
+        {
             int ret;
             // 【加锁】独占 DMA 引擎。因为环回测试会修改 SRC/DST 和 CMD 寄存器
             mutex_lock(&edu->hw_lock);
             ret = edu_dma_loopback_test(edu);
             mutex_unlock(&edu->hw_lock);
             return ret;
+        }
 
         default:
             return -ENOTTY;              
@@ -171,4 +226,5 @@ const struct file_operations edu_fops = {
     .read = edu_read,
     .write = edu_write,
     .unlocked_ioctl = edu_ioctl,
+    .llseek = default_llseek,
 };

@@ -2,6 +2,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/interrupt.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/dma-mapping.h>
@@ -83,9 +84,20 @@ static int edu_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     atomic_set(&edu->fact_ready, 0);
     atomic_set(&edu->dma_ready, 0);
     
-    // 注册中断 【注意：这里调用了 edu_hw.c 里的 edu_isr】
-    ret = request_irq(pdev->irq, edu_isr, IRQF_SHARED, DRIVER_NAME, edu);
-    if (ret) goto err_dma;
+    // 申请MSI中断向量
+    // 内核会读取设备的 PCIe 配置空间，判断支持哪种机制并自动分配
+    ret = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_ALL_TYPES);
+    if (ret < 0) {
+        printk(KERN_ERR "[EDU] Failed to allocate MSI/MSI-X vectors\n");
+        goto err_dma; 
+    }
+
+    // 挂载MSI中断服务程序
+    ret = request_irq(pci_irq_vector(pdev, 0), edu_isr, 0, DRIVER_NAME, edu);
+    if (ret) {
+        printk(KERN_ERR "[EDU] Failed to request IRQ\n");
+        goto err_msi; 
+    }
 
     // -----硬件DMA环回自测-----
     printk(KERN_INFO "[EDU] Running Power-On Self-Test (POST)...\n");
@@ -119,7 +131,9 @@ static int edu_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 err_cdev:
     cdev_del(&edu->cdev);
 err_irq:
-    free_irq(pdev->irq, edu);
+    free_irq(pci_irq_vector(pdev, 0), edu);
+err_msi:
+    pci_free_irq_vectors(pdev);
 err_dma:
     dma_free_coherent(&pdev->dev, EDU_DMA_SIZE, edu->dma_cpu_addr, edu->dma_bus_addr);
 err_iounmap:
@@ -145,7 +159,8 @@ static void edu_remove(struct pci_dev *pdev)
         // 按照 Probe 的反向顺序释放资源
         device_destroy(edu_class, edu->dev_num);
         cdev_del(&edu->cdev);
-        free_irq(pdev->irq, edu);
+        free_irq(pci_irq_vector(pdev, 0), edu);
+        pci_free_irq_vectors(pdev);
         dma_free_coherent(&pdev->dev, EDU_DMA_SIZE, edu->dma_cpu_addr, edu->dma_bus_addr);
         pci_iounmap(pdev, edu->mmio_base);
         pci_release_regions(pdev);

@@ -43,6 +43,7 @@ irqreturn_t edu_isr(int irq, void *dev) {
 int edu_dma_loopback_test(struct edu_device *edu) {
     u32 test_magic = 0xDEADBEEF;
     u32 *dma_buf = (u32 *)edu->dma_cpu_addr;
+    long timeout; // 超时变量
 
     // 准备阶段：dma缓存区划分
     dma_buf[0] = test_magic; // 发送区
@@ -56,10 +57,12 @@ int edu_dma_loopback_test(struct edu_device *edu) {
     atomic_set(&edu->dma_ready, 0); 
     writeq((u64)(DMA_CMD_START | DMA_CMD_IRQ_EN), edu->mmio_base + EDU_REG_DMA_CMD);
     
-    // 挂起等待中断
-    if (wait_event_interruptible(edu->wait_q, atomic_read(&edu->dma_ready) == 1)){
-        return -ERESTARTSYS;
-    }
+    // 加上 1 秒超时
+    timeout = wait_event_interruptible_timeout(edu->wait_q, atomic_read(&edu->dma_ready) == 1, msecs_to_jiffies(1000));
+    if (timeout == 0) {
+        printk(KERN_ERR "[EDU] POST Error: Loopback Stage 1 (Tx) Timeout!\n");
+        return -ETIMEDOUT;
+    } else if (timeout < 0) return -ERESTARTSYS;
 
     // --- 第 2 阶段：硬件SRAM -> 主存 ---
     writeq((u64)EDU_SRAM, edu->mmio_base + EDU_REG_DMA_SRC);
@@ -69,9 +72,12 @@ int edu_dma_loopback_test(struct edu_device *edu) {
     atomic_set(&edu->dma_ready, 0); 
     writeq((u64)(DMA_CMD_START | DMA_CMD_IRQ_EN | DMA_CMD_DEV_RAM), edu->mmio_base + EDU_REG_DMA_CMD);
     
-    if (wait_event_interruptible(edu->wait_q, atomic_read(&edu->dma_ready) == 1)){
-        return -ERESTARTSYS;
-    }
+    // 同样加上 1 秒超时
+    timeout = wait_event_interruptible_timeout(edu->wait_q, atomic_read(&edu->dma_ready) == 1, msecs_to_jiffies(1000));
+    if (timeout == 0) {
+        printk(KERN_ERR "[EDU] POST Error: Loopback Stage 2 (Rx) Timeout!\n");
+        return -ETIMEDOUT;
+    } else if (timeout < 0) return -ERESTARTSYS;
     
     // --- 第 3 阶段：数据校验 ---
     if (dma_buf[1] == test_magic) {

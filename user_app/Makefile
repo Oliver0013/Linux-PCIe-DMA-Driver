@@ -13,7 +13,7 @@ CC := $(CROSS_COMPILE)gcc
 CFLAGS ?= -Wall -O2 -pthread
 
 # 3. 目标定义
-TARGETS := test_rw stress_test
+TARGETS := test_ioctl test_dma_stream stress_test
 
 .PHONY: all clean
 
