@@ -79,7 +79,9 @@ struct edu_device {
     void *dma_cpu_addr;            // CPU用的虚拟内核地址（一致性DMA）
     dma_addr_t dma_bus_addr;       // 设备用的总线物理地址
 
-    struct mutex hw_lock;          // 硬件互斥锁
+    struct mutex dma_mutex;        // DMA互斥锁 (0x80 - 0x98 寄存器)
+    struct mutex fact_mutex;       // 阶乘互斥锁 (0x08, 0x20 寄存器)
+
 };
 
 // ========================================================

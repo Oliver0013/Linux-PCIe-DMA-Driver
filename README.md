@@ -43,7 +43,8 @@ Linux-PCIe-DMA-Driver/
 |   └── uapi_edu.h     # [用户侧头文件] ioctl 宏与共享结构
 │
 ├── user_app/               # [用户态] 测试程序
-│   ├── test_rw.c           # 基本功能测试
+│   ├── test_ioctl.c        # 控制面测试
+│   ├── test_dma_stream.c   # dma读写测试
 |   ├── stress_test.c       # 并发压力测试
 │   └── benchmark.py        # Python 性能测试
 │
@@ -230,6 +231,20 @@ Linux-PCIe-DMA-Driver/
 * [x] **2026-02-20**: 测试套件重构。
   + 用例解耦: 将用户态测试验证拆分为 test_ioctl (控制平面验证) 与 test_dma_stream (数据平面验证)。
   + 完整性校验: 补充流式 DMA 满载收发的数据一致性比对、lseek 随机定位校验以及 VFS 边界截断触发测试，严格处理并断言系统调用返回值。
+
+### P12: 并发控制优化与异常处理重构
+
+* [x] **2026-02-21**: 引入细粒度锁 (Fine-grained Locking) 机制。
+  + 架构重构: 废弃全局硬件单例锁 (`hw_lock`)，按物理模块独立性拆分为 DMA 引擎专有锁 (`dma_mutex`) 与阶乘单元专有锁 (`fact_mutex`)。
+  + 性能收益: 实现控制平面与数据平面的并发隔离，消除无状态关联模块间的强制串行化，提升整体 I/O 吞吐量。
+
+* [x] **2026-02-21**: 修复 TASK_UNINTERRUPTIBLE (D状态) 死锁隐患。
+  + 机制替换: 在 VFS 接口层 (`read/write/ioctl`) 将不可中断的 `mutex_lock` 统一替换为 `mutex_lock_interruptible`。
+  + 异常响应: 允许阻塞等待硬件资源的进程响应 `SIGINT` 等异步信号，避免因底层故障导致进程僵死，合规拦截并向 VFS 返回 `-ERESTARTSYS`。
+
+* [x] **2026-02-21**: 确立基于同步请求模型的极简并发架构。
+  + 竞态排除: 经时序分析确认 ISR 仅访问独立的 Status/ACK 寄存器，不干预 DMA 配置，故在此场景中排除 `spin_lock_irq` 关本地中断的需求，降低中断延迟。
+  + 调度定型: 针对 EDU 设备的同步“请求-响应”特性，直接复用被唤醒的用户进程上下文处理 VFS 层的数据解映射与拷贝，避免强行引入 Workqueue/NAPI 造成的上下文切换开销。
 
 ---
 

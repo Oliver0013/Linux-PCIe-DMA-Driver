@@ -33,7 +33,8 @@ static int edu_probe(struct pci_dev *pdev, const struct pci_device_id *id)
     edu = kzalloc(sizeof(struct edu_device), GFP_KERNEL);
     if (!edu) return -ENOMEM;
 
-    mutex_init(&edu->hw_lock);
+    mutex_init(&edu->dma_mutex);
+    mutex_init(&edu->fact_mutex);
 
     //动态分配空闲的次设备号
     minor = ida_alloc_max(&edu_ida, MAX_EDU_DEVICES - 1, GFP_KERNEL);

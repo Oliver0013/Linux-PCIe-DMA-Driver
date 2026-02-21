@@ -33,7 +33,7 @@ static ssize_t edu_read(struct file *file, char __user *buf, size_t len, loff_t 
         len = EDU_SRAM_SIZE - *off;
     }
     if (len == 0) return 0;
-
+    //内存分配
     kbuf = kmalloc(len, GFP_KERNEL);
     if (!kbuf) return -ENOMEM;
 
@@ -44,9 +44,14 @@ static ssize_t edu_read(struct file *file, char __user *buf, size_t len, loff_t 
         goto out_free;
     }
 
-    // 3. 【加锁】进入 DMA 硬件配置临界区
-    mutex_lock(&edu->hw_lock);
-
+    // 可中断加锁
+    // 专门获取 DMA 锁。如果用户按了 Ctrl+C，立刻清理并返回 -ERESTARTSYS
+    if (mutex_lock_interruptible(&edu->dma_mutex)) {
+        dma_unmap_single(&edu->pdev->dev, dma_handle, len, DMA_FROM_DEVICE);
+        kfree(kbuf);
+        return -ERESTARTSYS;
+    }
+    // 临界区
     // 源地址 = 硬件 SRAM 基地址 + 当前的文件读写偏移量
     writeq((u64)(EDU_SRAM + *off), edu->mmio_base + EDU_REG_DMA_SRC);
     writeq((u64)dma_handle, edu->mmio_base + EDU_REG_DMA_DST);
@@ -56,10 +61,11 @@ static ssize_t edu_read(struct file *file, char __user *buf, size_t len, loff_t 
     // 注意方向标志：DMA_CMD_DEV_RAM
     writeq((u64)(DMA_CMD_START | DMA_CMD_DEV_RAM | DMA_CMD_IRQ_EN), edu->mmio_base + EDU_REG_DMA_CMD);
 
-    // 4. 【超时保护】挂起等待
+    // 【超时保护】挂起等待
     timeout = wait_event_interruptible_timeout(edu->wait_q, atomic_read(&edu->dma_ready) == 1, msecs_to_jiffies(1000));
 
-    mutex_unlock(&edu->hw_lock);
+    // 安全解锁
+    mutex_unlock(&edu->dma_mutex);
 
     // 5. 解除流式映射 (核心：内核在此处 Invalidate CPU Cache)
     dma_unmap_single(&edu->pdev->dev, dma_handle, len, DMA_FROM_DEVICE);
@@ -117,7 +123,11 @@ static ssize_t edu_write(struct file *file, const char __user *buf, size_t len, 
     }
 
     // 4. 【加锁】进入 DMA 硬件配置临界区
-    mutex_lock(&edu->hw_lock);
+    if (mutex_lock_interruptible(&edu->dma_mutex)) {
+        dma_unmap_single(&edu->pdev->dev, dma_handle, len, DMA_TO_DEVICE);
+        kfree(kbuf);
+        return -ERESTARTSYS;
+    }
 
     // 目标地址 = 硬件 SRAM 基地址 + 当前的文件读写偏移量
     writeq((u64)dma_handle, edu->mmio_base + EDU_REG_DMA_SRC);
@@ -131,7 +141,7 @@ static ssize_t edu_write(struct file *file, const char __user *buf, size_t len, 
     timeout = wait_event_interruptible_timeout(edu->wait_q, atomic_read(&edu->dma_ready) == 1, msecs_to_jiffies(1000));
 
     // 6. 退出临界区
-    mutex_unlock(&edu->hw_lock);
+    mutex_unlock(&edu->dma_mutex);
 
     // 7. 解除流式映射 (释放总线地址)
     dma_unmap_single(&edu->pdev->dev, dma_handle, len, DMA_TO_DEVICE);
@@ -173,7 +183,8 @@ static long edu_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
             if (copy_from_user(&req, (struct edu_fact_req __user *)arg, sizeof(req))) return -EFAULT;
 
             //加锁独占硬件的阶乘计算单元
-            mutex_lock(&edu->hw_lock);
+            if (mutex_lock_interruptible(&edu->fact_mutex))
+                return -ERESTARTSYS;
 
             iowrite32(STATUS_IRQ_EN, edu->mmio_base + EDU_REG_STATUS);
             atomic_set(&edu->fact_ready, 0);
@@ -184,10 +195,10 @@ static long edu_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
 
             if (timeout == 0) {
                 printk(KERN_ERR "[EDU] HW Fault: Factorial calculation timed out!\n");
-                mutex_unlock(&edu->hw_lock);
+                mutex_unlock(&edu->fact_mutex);
                 return -ETIMEDOUT; // 返回标准超时错误码
             } else if (timeout < 0) {
-                mutex_unlock(&edu->hw_lock);
+                mutex_unlock(&edu->fact_mutex);
                 return -ERESTARTSYS; // 被信号打断
             }
             
@@ -197,7 +208,7 @@ static long edu_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
             req.result = ioread32(edu->mmio_base + EDU_REG_FACTORIAL);
 
             // 数据读取完毕，正常解锁
-            mutex_unlock(&edu->hw_lock);
+            mutex_unlock(&edu->fact_mutex);
 
             if (copy_to_user((struct edu_fact_req __user *)arg, &req, sizeof(req))) return -EFAULT;
             break; 
@@ -207,9 +218,11 @@ static long edu_ioctl(struct file *file, unsigned int cmd, unsigned long arg){
         {
             int ret;
             // 【加锁】独占 DMA 引擎。因为环回测试会修改 SRC/DST 和 CMD 寄存器
-            mutex_lock(&edu->hw_lock);
+            if (mutex_lock_interruptible(&edu->dma_mutex))
+                return -ERESTARTSYS;
+                
             ret = edu_dma_loopback_test(edu);
-            mutex_unlock(&edu->hw_lock);
+            mutex_unlock(&edu->dma_mutex);
             return ret;
         }
 
